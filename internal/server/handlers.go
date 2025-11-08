@@ -196,18 +196,27 @@ func (s *Server) sseHandler() http.HandlerFunc {
 		} else {
 			if _, err := fmt.Fprintf(w, "data: %s\n\n", jsonData); err != nil {
 				log.Printf("ERROR: failed to send initial SSE room list: %v", err)
+				return // Exit if we can't write to the client
 			}
 		}
 		w.(http.Flusher).Flush()
 
 		for {
 			select {
-			case eventData := <-clientChan:
+			case eventData, ok := <-clientChan:
+				if !ok {
+					return // Hub manager closed the channel.
+				}
 				if _, err := fmt.Fprintf(w, "data: %s\n\n", eventData); err != nil {
 					log.Printf("ERROR: failed to send SSE event data: %v", err)
+					return // Exit if we can't write to the client
 				}
 				w.(http.Flusher).Flush()
 			case <-r.Context().Done():
+				log.Printf("INFO: SSE client connection closed by client (nickname: %s)", validatedNickname)
+				return
+			case <-s.shutdownChan:
+				log.Printf("INFO: Server shutdown signal received. Closing SSE connection for %s.", validatedNickname)
 				return
 			}
 		}

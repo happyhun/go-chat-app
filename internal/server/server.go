@@ -22,9 +22,10 @@ type Config struct {
 
 // Server manages the application's core dependencies (config, hub manager, router).
 type Server struct {
-	config     *Config
-	hubManager *chat.HubManager
-	router     *http.ServeMux
+	config       *Config
+	hubManager   *chat.HubManager
+	router       *http.ServeMux
+	shutdownChan chan struct{}
 }
 
 // New creates and initializes a new Server instance.
@@ -32,9 +33,10 @@ type Server struct {
 func New(config *Config) *Server {
 	hubManager := chat.NewHubManager()
 	server := &Server{
-		config:     config,
-		hubManager: hubManager,
-		router:     http.NewServeMux(),
+		config:       config,
+		hubManager:   hubManager,
+		router:       http.NewServeMux(),
+		shutdownChan: make(chan struct{}),
 	}
 	server.registerRoutes()
 	return server
@@ -60,11 +62,15 @@ func (s *Server) Start() {
 	<-quit
 	log.Println("Shutting down server...")
 
-	// Notify all clients and safely shut down all hubs
+	// 1. Signal all long-running HTTP handlers (like SSE) to shut down.
+	// This must be done BEFORE shutting down hubs, which might generate events that
+	// could cause a deadlock in the SSE handler.
+	close(s.shutdownChan)
+
+	// 2. Shut down all WebSocket hubs.
 	s.hubManager.ShutdownAllHubs()
 
-	// The context is used to inform the server it has 5 seconds to finish
-	// the request it is currently handling
+	// 3. Shut down the HTTP server itself, waiting for handlers to finish.
 	ctx, cancel := context.WithTimeout(context.Background(), s.config.ShutdownTimeout)
 	defer cancel()
 
