@@ -29,7 +29,10 @@ func loadConfig() *server.Config {
 	allowedOriginsEnv := os.Getenv("ALLOWED_ORIGINS")
 	var allowedOrigins []string
 	if allowedOriginsEnv != "" {
-		allowedOrigins = strings.Split(allowedOriginsEnv, ",")
+		origins := strings.Split(allowedOriginsEnv, ",")
+		for _, origin := range origins {
+			allowedOrigins = append(allowedOrigins, strings.TrimSpace(origin))
+		}
 	}
 
 	log.Printf("Configuration loaded: Port=%s, ShutdownTimeout=%v", port, shutdownTimeout)
