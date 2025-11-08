@@ -18,11 +18,11 @@
  * @throws {Error} If the API call fails.
  */
 export async function fetchConfig() {
-    const response = await fetch("/api/config");
-    if (!response.ok) {
-        throw new Error(`Failed to fetch config: ${response.statusText}`);
-    }
-    return await response.json();
+  const response = await fetch("/api/config");
+  if (!response.ok) {
+    throw new Error(`Failed to fetch config: ${response.statusText}`);
+  }
+  return await response.json();
 }
 
 /**
@@ -32,20 +32,20 @@ export async function fetchConfig() {
  * @throws {Error} If the API call fails or the server returns an error.
  */
 export async function checkNicknameAvailability(nickname) {
-    const response = await fetch("/api/nicknames/check", {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({nickname}),
-    });
-    if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(errorText || "Server error during nickname check.");
-    }
-    /** @type {NicknameAvailabilityResponse} */
-    const data = await response.json();
-    return data.available;
+  const response = await fetch("/api/nicknames/check", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ nickname }),
+  });
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(errorText || "Server error during nickname check.");
+  }
+  /** @type {NicknameAvailabilityResponse} */
+  const data = await response.json();
+  return data.available;
 }
 
 /**
@@ -55,19 +55,20 @@ export async function checkNicknameAvailability(nickname) {
  * @throws {Error} If the API call fails, the roomID is invalid, or a room with the same ID already exists.
  */
 export async function createRoom(roomID) {
-    const response = await fetch("/api/rooms", {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({roomID}),
-    });
-    if (!response.ok) {
-        const errorText = await response.text();
-        if (response.status === 409) { // Conflict
-            throw new Error(errorText || "A room with this name already exists.");
-        }
-        throw new Error(errorText || "Server error while creating the room.");
+  const response = await fetch("/api/rooms", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ roomID }),
+  });
+  if (!response.ok) {
+    const errorText = await response.text();
+    if (response.status === 409) {
+      // Conflict
+      throw new Error(errorText || "A room with this name already exists.");
     }
-    return await response.json();
+    throw new Error(errorText || "Server error while creating the room.");
+  }
+  return await response.json();
 }

@@ -1,77 +1,99 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta content="width=device-width, initial-scale=1.0" name="viewport">
+  <head>
+    <meta charset="utf-8" />
+    <meta content="width=device-width, initial-scale=1.0" name="viewport" />
     <title>Go Real-time Chat</title>
-    <meta content="A multi-room chat application using Go and WebSockets." name="description">
-    <link href="/static/css/style.css" rel="stylesheet">
-</head>
-<body>
-
-<!-- Nickname Input Container: Initial view to get user's nickname -->
-<div id="nickname-container">
-    <form id="nickname-form">
+    <meta
+      content="A multi-room chat application using Go and WebSockets."
+      name="description"
+    />
+    <link href="/static/css/style.css" rel="stylesheet" />
+  </head>
+  <body>
+    <!-- Nickname Input Container: Initial view to get user's nickname -->
+    <div id="nickname-container">
+      <form id="nickname-form">
         <label for="nickname-input"><h2>Enter your nickname</h2></label>
-        <input autocomplete="off" autofocus id="nickname-input" placeholder="Nickname" required type="text">
+        <input
+          autocomplete="off"
+          autofocus
+          id="nickname-input"
+          placeholder="Nickname"
+          required
+          type="text"
+        />
         <div id="nickname-feedback"></div>
         <button type="submit">Enter Lobby</button>
-    </form>
-</div>
+      </form>
+    </div>
 
-<!-- Lobby Container: Shows room list and allows creating new rooms -->
-<div class="hidden" id="lobby-container">
-    <!-- Loader: Shown while connecting to a chat room -->
-    <div class="hidden" id="lobby-loader">
+    <!-- Lobby Container: Shows room list and allows creating new rooms -->
+    <div class="hidden" id="lobby-container">
+      <!-- Loader: Shown while connecting to a chat room -->
+      <div class="hidden" id="lobby-loader">
         <div class="spinner"></div>
         <p>Connecting to chat room...</p>
-    </div>
+      </div>
 
-    <div class="lobby-header">
+      <div class="lobby-header">
         <h2>Lobby</h2>
         <div id="lobby-status">
-            <span class="disconnected" id="lobby-status-indicator"></span>
-            <span id="lobby-status-text">Disconnected</span>
+          <span class="disconnected" id="lobby-status-indicator"></span>
+          <span id="lobby-status-text">Disconnected</span>
         </div>
-    </div>
-    <p>Welcome, <strong id="lobby-nickname"></strong>!</p>
+      </div>
+      <p>Welcome, <strong id="lobby-nickname"></strong>!</p>
 
-    <div id="room-list-container">
+      <div id="room-list-container">
         <h3>Available Chat Rooms</h3>
-        <div id="room-list"></div> <!-- Room list is dynamically loaded here -->
-    </div>
+        <div id="room-list"></div>
+        <!-- Room list is dynamically loaded here -->
+      </div>
 
-    <form id="create-room-form">
+      <form id="create-room-form">
         <h3>Or, create a new room</h3>
         <label class="sr-only" for="new-room-input">New Room Name</label>
-        <input autocomplete="off" id="new-room-input" placeholder="New room name" required type="text">
+        <input
+          autocomplete="off"
+          id="new-room-input"
+          placeholder="New room name"
+          required
+          type="text"
+        />
         <button type="submit">Create & Join</button>
-    </form>
-</div>
+      </form>
+    </div>
 
-<!-- Chat Container: Main chat interface for a specific room -->
-<div class="hidden" id="chat-container">
-    <div id="chat-header">
+    <!-- Chat Container: Main chat interface for a specific room -->
+    <div class="hidden" id="chat-container">
+      <div id="chat-header">
         <button id="leave-room-btn">← Lobby</button>
         <div class="chat-header-info">
-            <h3 id="chat-room-name"></h3>
-            <p>Users: <span id="user-count">0</span></p>
+          <h3 id="chat-room-name"></h3>
+          <p>Users: <span id="user-count">0</span></p>
         </div>
-    </div>
-    <div id="messages"></div> <!-- Chat messages are displayed here -->
-    <div id="typing-indicator"></div>
-    <form id="chat-form">
+      </div>
+      <div id="messages"></div>
+      <!-- Chat messages are displayed here -->
+      <div id="typing-indicator"></div>
+      <form id="chat-form">
         <div class="message-input-wrapper">
-            <label class="sr-only" for="message-input">Message Input</label>
-            <input autocomplete="off" id="message-input" placeholder="Type a message..." required type="text">
-            <span id="char-counter">0 / 1000</span>
+          <label class="sr-only" for="message-input">Message Input</label>
+          <input
+            autocomplete="off"
+            id="message-input"
+            placeholder="Type a message..."
+            required
+            type="text"
+          />
+          <span id="char-counter">0 / 1000</span>
         </div>
         <button type="submit">Send</button>
-    </form>
-</div>
+      </form>
+    </div>
 
-<!-- Main application script (ES Module) -->
-<script src="/static/js/main.js" type="module"></script>
-
-</body>
+    <!-- Main application script (ES Module) -->
+    <script src="/static/js/main.js" type="module"></script>
+  </body>
 </html>
