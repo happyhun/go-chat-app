@@ -16,9 +16,9 @@ Go와 웹 기술(WebSocket, SSE)을 사용하여 구현한 실시간 다중 채�
 ## 기술 스택
 
 - **백엔드**: Go
-  - **WebSocket**: `gorilla/websocket`
-  - **Server-Sent Events (SSE)**
-  - **동시성**: Goroutines & Channels
+    - **WebSocket**: `gorilla/websocket`
+    - **Server-Sent Events (SSE)**
+    - **동시성**: Goroutines & Channels
 - **프론트엔드**: Vanilla JavaScript (ESM), HTML5, CSS3
 
 ## 프로젝트 구조
@@ -56,21 +56,25 @@ go-chat-app/
 Go의 동시성 모델을 활용하여 상태를 안전하고 효율적으로 관리합니다.
 
 - **Hub-Client 아키텍처**: 각 채팅방(`Hub`)은 독립적인 고루틴에서 실행되며, 자신만의 클라이언트 목록과 메시지 채널을 가집니다. 이를 통해 각 채팅방의 상태가 격리되어 관리됩니다.
-- **채널 기반 상태 관리**: 클라이언트의 등록, 해제, 메시지 브로드캐스팅 등 모든 상태 변경 작업은 채널을 통해 `Hub`의 메인 고루틴에서 순차적으로 처리됩니다. 이는 Mutex 락 대신 채널을 사용하여 상태 변경을 동기화함으로써, 레이스 컨디션을 방지하고 스레드 안전성을 확보하는 방식입니다.
-- **안전한 고루틴 종료**: `readPump`가 연결 종료를 감지하면 `quit` 채널을 닫아 `writePump`에 종료 신호를 보냅니다. 이를 통해 `writePump`가 이미 닫힌 커넥션에 쓰기를 시도하는 `use of closed network connection` 오류를 방지하고 리소스를 정리합니다.
+- **채널 기반 상태 관리**: 클라이언트의 등록, 해제, 메시지 브로드캐스팅 등 모든 상태 변경 작업은 채널을 통해 `Hub`의 메인 고루틴에서 순차적으로 처리됩니다. 이는 Mutex 락 대신 채널을 사용하여
+  상태 변경을 동기화함으로써, 레이스 컨디션을 방지하고 스레드 안전성을 확보하는 방식입니다.
+- **안전한 고루틴 종료**: `readPump`가 연결 종료를 감지하면 `quit` 채널을 닫아 `writePump`에 종료 신호를 보냅니다. 이를 통해 `writePump`가 이미 닫힌 커넥션에 쓰기를 시도하는
+  `use of closed network connection` 오류를 방지하고 리소스를 정리합니다.
 
 ### 3. 우아한 종료 (Graceful Shutdown)
 
 서버는 `os.Signal`을 감지하여 우아한 종료를 수행합니다. 종료 신호 수신 시, 다음 절차를 따릅니다.
 
-1.  모든 활성 `Hub`에 종료 메시지를 보내 클라이언트에게 서버 종료를 알립니다.
-2.  모든 `Hub`의 고루틴이 안전하게 종료될 때까지 대기합니다.
-3.  `context.WithTimeout`을 사용하여 진행 중인 HTTP 요청이 완료될 시간을 준 후 서버를 종료합니다.
+1. 모든 활성 `Hub`에 종료 메시지를 보내 클라이언트에게 서버 종료를 알립니다.
+2. 모든 `Hub`의 고루틴이 안전하게 종료될 때까지 대기합니다.
+3. `context.WithTimeout`을 사용하여 진행 중인 HTTP 요청이 완료될 시간을 준 후 서버를 종료합니다.
 
 ### 4. 보안 고려사항
 
-- **WebSocket Origin 검증**: Cross-Site WebSocket Hijacking (CSWH) 공격을 방지하기 위해 요청의 `Origin` 헤더를 검증합니다. 허용할 Origin 목록은 `ALLOWED_ORIGINS` 환경 변수를 통해 설정할 수 있습니다.
-- **XSS (Cross-Site Scripting) 방지**: 모든 사용자 입력(닉네임, 메시지)은 프론트엔드에서 `textContent`를 통해 렌더링하여, HTML 태그가 아닌 순수 텍스트로 처리되도록 함으로써 XSS 공격을 방지합니다.
+- **WebSocket Origin 검증**: Cross-Site WebSocket Hijacking (CSWH) 공격을 방지하기 위해 요청의 `Origin` 헤더를 검증합니다. 허용할 Origin 목록은
+  `ALLOWED_ORIGINS` 환경 변수를 통해 설정할 수 있습니다.
+- **XSS (Cross-Site Scripting) 방지**: 모든 사용자 입력(닉네임, 메시지)은 프론트엔드에서 `textContent`를 통해 렌더링하여, HTML 태그가 아닌 순수 텍스트로 처리되도록
+  함으로써 XSS 공격을 방지합니다.
 - **콘텐츠 보안 정책 (CSP)**: `default-src 'self'`의 CSP 헤더를 적용하여 신뢰할 수 없는 외부 스크립트나 리소스의 로드를 제한합니다.
 
 ## 환경 변수 설정
@@ -80,5 +84,5 @@ Go의 동시성 모델을 활용하여 상태를 안전하고 효율적으로 �
 - **`PORT`**: 서버가 실행될 포트 번호. (기본값: `8080`)
 - **`SHUTDOWN_TIMEOUT`**: 우아한 종료 시 대기 시간. (기본값: `5s`)
 - **`ALLOWED_ORIGINS`**: WebSocket 연결을 허용할 Origin 목록 (쉼표로 구분). 설정하지 않으면 개발 편의를 위해 모든 Origin을 허용하며, 경고 메시지가 출력됩니다.
-  - **프로덕션 예시:** `ALLOWED_ORIGINS="https://your-domain.com,https://www.your-domain.com"`
-  - **ngrok 예시:** `ALLOWED_ORIGINS="https://your-ngrok-subdomain.ngrok.io"`
+    - **프로덕션 예시:** `ALLOWED_ORIGINS="https://your-domain.com,https://www.your-domain.com"`
+    - **ngrok 예시:** `ALLOWED_ORIGINS="https://your-ngrok-subdomain.ngrok.io"`
