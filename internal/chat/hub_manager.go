@@ -23,7 +23,6 @@ var (
 )
 
 // HubManager manages all chat rooms (Hubs) and global nickname uniqueness.
-// It also broadcasts room list updates to lobby clients.
 type HubManager struct {
 	rooms          map[string]*Hub
 	roomsMu        sync.RWMutex
@@ -32,6 +31,7 @@ type HubManager struct {
 	lobbyUpdates   chan bool
 	lobbyClients   map[chan string]bool
 	lobbyClientsMu sync.RWMutex
+	hubWg          sync.WaitGroup // WaitGroup to track all running Hub goroutines.
 }
 
 // RoomInfo contains basic information about a chat room for lobby display.
@@ -41,7 +41,6 @@ type RoomInfo struct {
 }
 
 // NewHubManager creates and initializes a new HubManager instance.
-// It starts the lobby broadcast routine.
 func NewHubManager() *HubManager {
 	m := &HubManager{
 		rooms:        make(map[string]*Hub),
@@ -56,8 +55,7 @@ func NewHubManager() *HubManager {
 // lobbyBroadcastRoutine listens for lobby update notifications and broadcasts
 // the current room list to all registered lobby clients.
 func (m *HubManager) lobbyBroadcastRoutine() {
-	for {
-		<-m.lobbyUpdates
+	for range m.lobbyUpdates {
 		rooms := m.ListRooms()
 		jsonData, err := json.Marshal(rooms)
 		if err != nil {
@@ -77,7 +75,6 @@ func (m *HubManager) lobbyBroadcastRoutine() {
 }
 
 // notifyLobbyUpdate sends a notification to update the lobby.
-// It is non-blocking and will skip if an update is already pending.
 func (m *HubManager) notifyLobbyUpdate() {
 	select {
 	case m.lobbyUpdates <- true:
@@ -100,15 +97,13 @@ func (m *HubManager) UnregisterLobbyClient(clientChan chan string) {
 }
 
 // RemoveHub removes a hub from the HubManager.
-// It closes the hub's stop channel and notifies the lobby of the change.
 func (m *HubManager) RemoveHub(hubID string) {
 	m.roomsMu.Lock()
 	defer m.roomsMu.Unlock()
 
-	if hub, ok := m.rooms[hubID]; ok {
-		close(hub.stop)
+	if _, ok := m.rooms[hubID]; ok {
 		delete(m.rooms, hubID)
-		log.Printf("INFO: Hub '%s' removed as it became empty.", hubID)
+		log.Printf("INFO: Hub '%s' removed from manager as it became empty.", hubID)
 		m.notifyLobbyUpdate()
 	}
 }
@@ -116,21 +111,23 @@ func (m *HubManager) RemoveHub(hubID string) {
 // ShutdownAllHubs sends a shutdown message to all active hubs and waits for them to finish.
 func (m *HubManager) ShutdownAllHubs() {
 	m.roomsMu.RLock()
-	defer m.roomsMu.RUnlock()
-	shutdownMsg, err := NewMessage(MsgTypeServerShutdown, "", "", "Server is shutting down for maintenance. Please try again later.")
-	if err != nil {
-		log.Printf("ERROR: failed to create server shutdown message: %v", err)
-		shutdownMsg = []byte(`{"type":"server_shutdown","content":"Server is shutting down."}`)
-	}
-	var wg sync.WaitGroup
+	hubsToShutdown := make([]*Hub, 0, len(m.rooms))
 	for _, hub := range m.rooms {
-		wg.Add(1)
-		go func(h *Hub) {
-			defer wg.Done()
-			h.stop <- shutdownMsg
-		}(hub)
+		hubsToShutdown = append(hubsToShutdown, hub)
 	}
-	wg.Wait()
+	m.roomsMu.RUnlock()
+
+	shutdownMsg, _ := NewMessage(MsgTypeServerShutdown, "", "", "Server is shutting down for maintenance. Please try again later.")
+
+	for _, hub := range hubsToShutdown {
+		hub.stop <- shutdownMsg
+	}
+
+	// Wait for all Hub goroutines to completely finish.
+	m.hubWg.Wait()
+
+	// Now that all hubs are stopped, it's safe to close the lobbyUpdates channel.
+	close(m.lobbyUpdates)
 	log.Println("INFO: All hubs have been shut down.")
 }
 
@@ -146,7 +143,6 @@ func (m *HubManager) IsNicknameAvailable(nickname string) (bool, error) {
 }
 
 // AddNickname validates and adds a nickname to the global list.
-// It returns an error if the nickname is already in use or invalid.
 func (m *HubManager) AddNickname(nickname string) (string, error) {
 	validatedNickname, err := validateNickname(nickname)
 	if err != nil {
@@ -198,7 +194,6 @@ func validateRoomID(roomID string) (string, error) {
 }
 
 // CreateHub creates a new hub, starts it, and adds it to the manager.
-// It returns an error if a hub with the same ID already exists.
 func (m *HubManager) CreateHub(roomID string) (*Hub, error) {
 	validatedRoomID, err := validateRoomID(roomID)
 	if err != nil {
@@ -212,7 +207,11 @@ func (m *HubManager) CreateHub(roomID string) (*Hub, error) {
 	}
 
 	hub := NewHub(validatedRoomID, m)
-	go hub.Run()
+	m.hubWg.Add(1)
+	go func() {
+		defer m.hubWg.Done()
+		hub.Run()
+	}()
 	m.rooms[validatedRoomID] = hub
 	m.notifyLobbyUpdate()
 	log.Printf("INFO: Hub '%s' created.", validatedRoomID)
@@ -220,7 +219,6 @@ func (m *HubManager) CreateHub(roomID string) (*Hub, error) {
 }
 
 // GetHub returns a hub by its ID.
-// It returns an error if the hub does not exist.
 func (m *HubManager) GetHub(roomID string) (*Hub, error) {
 	validatedRoomID, err := validateRoomID(roomID)
 	if err != nil {

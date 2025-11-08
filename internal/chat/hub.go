@@ -38,60 +38,78 @@ func NewHub(id string, manager *HubManager) *Hub {
 		register:       make(chan *registration),
 		unregister:     make(chan *Client),
 		getClientCount: make(chan chan int),
-		stop:           make(chan []byte),
+		stop:           make(chan []byte, 1), // Buffered to prevent blocking on send.
 	}
 }
 
 // GetClientCount returns the current number of clients in the hub.
 func (h *Hub) GetClientCount() int {
 	respChan := make(chan int)
-	h.getClientCount <- respChan
-	return <-respChan
+	select {
+	case h.getClientCount <- respChan:
+		return <-respChan
+	case <-h.stop: // If hub is stopping, don't block and return 0.
+		return 0
+	}
 }
 
 // Run starts the main event loop for the hub.
-// It handles client registration, unregistration, and message broadcasting.
 func (h *Hub) Run() {
 	log.Printf("INFO: Hub '%s' started.", h.ID)
 	defer func() { log.Printf("INFO: Hub '%s' stopped.", h.ID) }()
+
 	for {
 		select {
 		case reg := <-h.register:
 			h.handleRegistration(reg)
+
 		case client := <-h.unregister:
-			h.handleUnregistration(client)
+			if _, ok := h.clients[client]; ok {
+				h.handleUnregistration(client)
+				// If the hub became empty naturally (not during a server shutdown),
+				// remove it from the manager and stop its own goroutine.
+				if len(h.clients) == 0 {
+					h.manager.RemoveHub(h.ID)
+					return // Stop the hub's goroutine.
+				}
+			}
+
 		case payload := <-h.broadcast:
 			h.handleBroadcast(payload)
+
 		case respChan := <-h.getClientCount:
 			respChan <- len(h.clients)
+
 		case shutdownMsg := <-h.stop:
+			close(h.stop) // Mark that we are shutting down.
+
+			// Notify all clients about the shutdown and close their send channels.
 			for client := range h.clients {
 				client.sendSafe(shutdownMsg)
 				close(client.send)
 			}
-			return
+
+			// Wait for all clients to unregister.
+			for len(h.clients) > 0 {
+				client := <-h.unregister
+				h.handleUnregistration(client)
+			}
+			return // All clients have unregistered, exit the Run method.
 		}
 	}
 }
 
 // handleRegistration registers a new client to the hub.
 func (h *Hub) handleRegistration(reg *registration) {
-	reg.client.Nickname = reg.nickname
 	h.clients[reg.client] = true
+	reg.client.Nickname = reg.nickname
 
-	successMsg, err := NewMessage(MsgTypeRegisterSuccess, reg.client.ID, "", "Successfully joined the chat room.")
-	if err != nil {
-		log.Printf("ERROR: failed to create registration success message: %v", err)
-	} else {
-		reg.client.sendSafe(successMsg)
-	}
+	successMsg, _ := NewMessage(MsgTypeRegisterSuccess, reg.client.ID, "", "Successfully joined the chat room.")
+	reg.client.sendSafe(successMsg)
+
 	log.Printf("INFO: Client %s (nickname: %s) registered to hub '%s'.", reg.client.ID, reg.nickname, h.ID)
 
-	joinMsg, err := NewMessage(MsgTypeUserJoin, reg.client.ID, reg.nickname, "")
-	if err != nil {
-		log.Printf("ERROR: failed to create user join message: %v", err)
-		return
-	}
+	joinMsg, _ := NewMessage(MsgTypeUserJoin, reg.client.ID, reg.nickname, "")
 	h.broadcast <- &broadcastPayload{message: joinMsg, client: nil}
 
 	h.broadcastUserCountUpdate()
@@ -100,30 +118,21 @@ func (h *Hub) handleRegistration(reg *registration) {
 
 // handleUnregistration unregisters a client from the hub.
 func (h *Hub) handleUnregistration(client *Client) {
-	if _, ok := h.clients[client]; !ok {
-		return
-	}
-
+	// The check for existence is now done in the caller.
 	delete(h.clients, client)
-	close(client.send)
 
 	if client.Nickname != "" {
 		log.Printf("INFO: Client %s (nickname: %s) unregistered from hub.", client.ID, client.Nickname)
-
-		leaveMsg, err := NewMessage(MsgTypeUserLeave, client.ID, client.Nickname, "")
-		if err != nil {
-			log.Printf("ERROR: failed to create user leave message: %v", err)
-		} else {
-			h.broadcast <- &broadcastPayload{message: leaveMsg, client: nil}
+		leaveMsg, _ := NewMessage(MsgTypeUserLeave, client.ID, client.Nickname, "")
+		// Use a non-blocking broadcast to avoid deadlocks if the hub is also shutting down.
+		select {
+		case h.broadcast <- &broadcastPayload{message: leaveMsg, client: nil}:
+		default:
 		}
 	}
 
 	h.broadcastUserCountUpdate()
 	h.manager.notifyLobbyUpdate()
-
-	if len(h.clients) == 0 {
-		h.manager.RemoveHub(h.ID)
-	}
 }
 
 // handleBroadcast broadcasts a message to all clients in the hub.
@@ -137,12 +146,10 @@ func (h *Hub) handleBroadcast(payload *broadcastPayload) {
 
 // broadcastUserCountUpdate broadcasts the current user count to all clients in the hub.
 func (h *Hub) broadcastUserCountUpdate() {
-	userCountMsg, err := NewMessage(MsgTypeUserCount, "", "", len(h.clients))
-	if err != nil {
-		log.Printf("ERROR: failed to create user count update message: %v", err)
-		return
-	}
-	for client := range h.clients {
-		client.sendSafe(userCountMsg)
+	userCountMsg, _ := NewMessage(MsgTypeUserCount, "", "", len(h.clients))
+	// Use a non-blocking broadcast to avoid deadlocks if the hub is also shutting down.
+	select {
+	case h.broadcast <- &broadcastPayload{message: userCountMsg, client: nil}:
+	default:
 	}
 }
