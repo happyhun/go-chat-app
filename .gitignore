@@ -18,6 +18,9 @@
 # IDE - JetBrains
 .idea/
 
+# IDE - VSCode
+.vscode/
+
 # OS - macOS
 .DS_Store
 
