@@ -26,6 +26,7 @@ type Server struct {
 	hubManager   *chat.HubManager
 	router       *http.ServeMux
 	shutdownChan chan struct{}
+	httpServer   *http.Server
 }
 
 // New creates and initializes a new Server instance.
@@ -38,20 +39,20 @@ func New(config *Config) *Server {
 		router:       http.NewServeMux(),
 		shutdownChan: make(chan struct{}),
 	}
+	server.httpServer = &http.Server{
+		Addr:    ":" + config.Port,
+		Handler: server.cspMiddleware(server.router),
+	}
 	server.registerRoutes()
 	return server
 }
 
-// Start begins the HTTP server and handles graceful shutdown.
+// Start begins the HTTP server and waits for a signal to initiate a graceful shutdown.
 func (s *Server) Start() {
-	server := &http.Server{
-		Addr:    ":" + s.config.Port,
-		Handler: s.cspMiddleware(s.router),
-	}
-
+	// Run the server in a separate goroutine so that it doesn't block.
 	go func() {
 		log.Printf("Server starting on http://localhost:%s", s.config.Port)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := s.httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("Failed to start server: %v", err)
 		}
 	}()
@@ -60,6 +61,12 @@ func (s *Server) Start() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
+
+	s.shutdown()
+}
+
+// shutdown orchestrates the graceful shutdown of the server.
+func (s *Server) shutdown() {
 	log.Println("Shutting down server...")
 
 	// 1. Signal all long-running HTTP handlers (like SSE) to shut down.
@@ -74,7 +81,7 @@ func (s *Server) Start() {
 	ctx, cancel := context.WithTimeout(context.Background(), s.config.ShutdownTimeout)
 	defer cancel()
 
-	if err := server.Shutdown(ctx); err != nil {
+	if err := s.httpServer.Shutdown(ctx); err != nil {
 		log.Fatalf("Server forced to shutdown: %v", err)
 	}
 
