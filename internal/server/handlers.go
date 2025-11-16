@@ -14,7 +14,7 @@ func (s *Server) registerRoutes() {
 	// Serve static files
 	s.router.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("web/static"))))
 	// Serve the main application page
-	s.router.HandleFunc("/", s.serveHome())
+	s.router.HandleFunc("/", s.serveIndexPage())
 	// Handle favicon requests
 	s.router.HandleFunc("/favicon.ico", s.handleFavicon())
 
@@ -38,8 +38,8 @@ func (s *Server) cspMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// serveHome serves the index.html file.
-func (s *Server) serveHome() http.HandlerFunc {
+// serveIndexPage serves the main index.html file.
+func (s *Server) serveIndexPage() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -70,14 +70,12 @@ func (s *Server) nicknameCheckHandler() http.HandlerFunc {
 			return
 		}
 
+		w.Header().Set("Content-Type", "application/json")
 		available, err := s.hubManager.IsNicknameAvailable(reqBody.Nickname)
 		if err != nil {
+			// Although IsNicknameAvailable currently doesn't return an error, handling it is good practice.
 			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(map[string]bool{"available": available}); err != nil {
+		} else if err := json.NewEncoder(w).Encode(map[string]bool{"available": available}); err != nil {
 			log.Printf("ERROR: failed to encode nickname availability response: %v", err)
 		}
 	}
@@ -125,100 +123,124 @@ func (s *Server) createRoomHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusCreated)
-	if err := json.NewEncoder(w).Encode(map[string]string{"status": "created", "roomID": reqBody.RoomID}); err != nil {
+	// Respond with the ID of the created room.
+	if err := json.NewEncoder(w).Encode(map[string]string{"roomID": reqBody.RoomID}); err != nil {
 		log.Printf("ERROR: failed to encode create room response: %v", err)
 	}
 }
 
 // configHandler provides client configuration, such as message length limits.
 func (s *Server) configHandler() http.HandlerFunc {
-	type clientConfig struct {
-		MaxChatMessageLength int `json:"maxChatMessageLength"`
-		MaxNicknameLength    int `json:"maxNicknameLength"`
-		MinNicknameLength    int `json:"minNicknameLength"`
-		MaxRoomIDLength      int `json:"maxRoomIDLength"`
-	}
-	cfg := clientConfig{
-		MaxChatMessageLength: s.config.MaxChatMessageLength,
-		MaxNicknameLength:    chat.MaxNicknameLength,
-		MinNicknameLength:    chat.MinNicknameLength,
-		MaxRoomIDLength:      chat.MaxRoomIDLength,
-	}
 	return func(w http.ResponseWriter, r *http.Request) {
+		// This struct defines the configuration data exposed to the client.
+		clientConfig := struct {
+			MaxChatMessageLength int `json:"maxChatMessageLength"`
+			MaxNicknameLength    int `json:"maxNicknameLength"`
+			MinNicknameLength    int `json:"minNicknameLength"`
+			MaxRoomIDLength      int `json:"maxRoomIDLength"`
+		}{
+			MaxChatMessageLength: s.config.MaxChatMessageLength,
+			MaxNicknameLength:    chat.MaxNicknameLength,
+			MinNicknameLength:    chat.MinNicknameLength,
+			MaxRoomIDLength:      chat.MaxRoomIDLength,
+		}
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(cfg); err != nil {
+		if err := json.NewEncoder(w).Encode(clientConfig); err != nil {
 			log.Printf("ERROR: failed to encode config response: %v", err)
 		}
 	}
+}
+
+// sendSseMessage formats and sends a message according to the Server-Sent Events protocol.
+func sendSseMessage(w http.ResponseWriter, data string) error {
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+		return err
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return nil
 }
 
 // sseHandler handles Server-Sent Events (SSE) for lobby updates.
 // It registers a client for lobby updates and streams changes to the room list.
 func (s *Server) sseHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		nickname := r.URL.Query().Get("nickname")
-		if nickname == "" {
-			http.Error(w, "Nickname is required for lobby stream", http.StatusBadRequest)
-			return
-		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
 
-		validatedNickname, err := s.hubManager.AddNickname(nickname)
-		if err != nil {
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.WriteHeader(http.StatusOK)
-			if _, err := fmt.Fprintf(w, "data: error: %s\n\n", err); err != nil {
-				log.Printf("ERROR: failed to send SSE error message: %v", err)
-			}
-			w.(http.Flusher).Flush()
-			log.Printf("INFO: SSE nickname registration failed for %s: %v", nickname, err)
-			return
+		validatedNickname, ok := s.handleNicknameValidation(w, r)
+		if !ok {
+			return // Nickname validation failed, response already sent.
 		}
-
 		defer func() {
 			s.hubManager.RemoveNickname(validatedNickname)
 			log.Printf("INFO: SSE client disconnected, nickname '%s' released", validatedNickname)
 		}()
 
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
+		s.streamEvents(w, r, validatedNickname)
+	}
+}
 
-		clientChan := make(chan string, 2)
-		s.hubManager.RegisterLobbyClient(clientChan)
-		defer s.hubManager.UnregisterLobbyClient(clientChan)
+// handleNicknameValidation checks for a valid nickname and registers it.
+// It returns the validated nickname and a boolean indicating success.
+// If validation fails, it writes an error to the response and returns false.
+func (s *Server) handleNicknameValidation(w http.ResponseWriter, r *http.Request) (string, bool) {
+	nickname := r.URL.Query().Get("nickname")
+	if nickname == "" {
+		http.Error(w, "Nickname is required for lobby stream", http.StatusBadRequest)
+		return "", false
+	}
 
-		log.Printf("INFO: SSE client connected (nickname: %s)", validatedNickname)
-
-		initialRooms := s.hubManager.ListRooms()
-		jsonData, err := json.Marshal(initialRooms)
-		if err != nil {
-			log.Printf("ERROR: failed to marshal initial lobby data: %v", err)
-		} else {
-			if _, err := fmt.Fprintf(w, "data: %s\n\n", jsonData); err != nil {
-				log.Printf("ERROR: failed to send initial SSE room list: %v", err)
-				return // Exit if we can't write to the client
-			}
+	validatedNickname, err := s.hubManager.AddNickname(nickname)
+	if err != nil {
+		log.Printf("INFO: SSE nickname registration failed for %s: %v", nickname, err)
+		// Send a specific error event to the client to be handled by the frontend.
+		if err := sendSseMessage(w, fmt.Sprintf(`{"error": "%s"}`, err.Error())); err != nil {
+			log.Printf("ERROR: failed to send SSE error message: %v", err)
 		}
-		w.(http.Flusher).Flush()
+		return "", false
+	}
+	return validatedNickname, true
+}
 
-		for {
-			select {
-			case eventData, ok := <-clientChan:
-				if !ok {
-					return // Hub manager closed the channel.
-				}
-				if _, err := fmt.Fprintf(w, "data: %s\n\n", eventData); err != nil {
-					log.Printf("ERROR: failed to send SSE event data: %v", err)
-					return // Exit if we can't write to the client
-				}
-				w.(http.Flusher).Flush()
-			case <-r.Context().Done():
-				log.Printf("INFO: SSE client connection closed by client (nickname: %s)", validatedNickname)
-				return
-			case <-s.shutdownChan:
-				log.Printf("INFO: Server shutdown signal received. Closing SSE connection for %s.", validatedNickname)
+// streamEvents handles the main SSE event streaming loop.
+func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, nickname string) {
+	clientChan := make(chan string, 2)
+	s.hubManager.RegisterLobbyClient(clientChan)
+	defer s.hubManager.UnregisterLobbyClient(clientChan)
+
+	log.Printf("INFO: SSE client connected (nickname: %s)", nickname)
+
+	// Send initial data
+	initialRooms := s.hubManager.ListRooms()
+	jsonData, err := json.Marshal(initialRooms)
+	if err != nil {
+		log.Printf("ERROR: failed to marshal initial lobby data: %v", err)
+		return
+	}
+	if err := sendSseMessage(w, string(jsonData)); err != nil {
+		log.Printf("ERROR: failed to send initial SSE room list: %v", err)
+		return
+	}
+
+	for {
+		select {
+		case eventData, ok := <-clientChan:
+			if !ok {
+				return // Hub manager closed the channel.
+			}
+			if err := sendSseMessage(w, eventData); err != nil {
+				log.Printf("ERROR: failed to send SSE event data: %v", err)
 				return
 			}
+		case <-r.Context().Done():
+			log.Printf("INFO: SSE client connection closed by client (nickname: %s)", nickname)
+			return
+		case <-s.shutdownChan:
+			log.Printf("INFO: Server shutdown signal received. Closing SSE connection for %s.", nickname)
+			return
 		}
 	}
 }
@@ -227,14 +249,22 @@ func (s *Server) sseHandler() http.HandlerFunc {
 // It upgrades the HTTP connection to a WebSocket and connects the client to the appropriate hub.
 func (s *Server) wsHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		roomID := strings.TrimPrefix(r.URL.Path, "/ws/")
-
-		hub, err := s.hubManager.GetHub(roomID)
-		if err != nil {
-			log.Printf("ERROR: failed to get hub for room '%s': %v", roomID, err)
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
+		hub, ok := s.getHubFromRequest(w, r)
+		if !ok {
+			return // Error response already sent by getHubFromRequest
 		}
 		chat.ServeWS(hub, w, r, s.config.MaxChatMessageLength, s.config.AllowedOrigins)
 	}
+}
+
+// getHubFromRequest extracts the roomID from the URL and retrieves the corresponding hub.
+// It writes an error to the response if the hub is not found.
+func (s *Server) getHubFromRequest(w http.ResponseWriter, r *http.Request) (*chat.Hub, bool) {
+	roomID := strings.TrimPrefix(r.URL.Path, "/ws/")
+	hub, err := s.hubManager.GetHub(roomID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return nil, false
+	}
+	return hub, true
 }
