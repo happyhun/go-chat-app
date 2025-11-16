@@ -32,6 +32,7 @@ type HubManager struct {
 	lobbyClients   map[chan string]bool
 	lobbyClientsMu sync.RWMutex
 	hubWg          sync.WaitGroup // WaitGroup to track all running Hub goroutines.
+	managerWg      sync.WaitGroup // WaitGroup for the manager's own goroutines (e.g., lobby broadcaster).
 }
 
 // RoomInfo contains basic information about a chat room for lobby display.
@@ -48,6 +49,7 @@ func NewHubManager() *HubManager {
 		lobbyUpdates: make(chan bool, 1),
 		lobbyClients: make(map[chan string]bool),
 	}
+	m.managerWg.Add(1)
 	go m.lobbyBroadcastRoutine()
 	return m
 }
@@ -55,6 +57,7 @@ func NewHubManager() *HubManager {
 // lobbyBroadcastRoutine listens for lobby update notifications and broadcasts
 // the current room list to all registered lobby clients.
 func (m *HubManager) lobbyBroadcastRoutine() {
+	defer m.managerWg.Done()
 	for range m.lobbyUpdates {
 		rooms := m.ListRooms()
 		jsonData, err := json.Marshal(rooms)
@@ -117,10 +120,9 @@ func (m *HubManager) ShutdownAllHubs() {
 	}
 	m.roomsMu.RUnlock()
 
-	shutdownMsg, _ := NewMessage(MsgTypeServerShutdown, "", "", "Server is shutting down for maintenance. Please try again later.")
-
 	for _, hub := range hubsToShutdown {
-		hub.stop <- shutdownMsg
+		// Send a signal on the stop channel. The value itself doesn't matter.
+		hub.stop <- struct{}{}
 	}
 
 	// Wait for all Hub goroutines to completely finish.
@@ -128,23 +130,25 @@ func (m *HubManager) ShutdownAllHubs() {
 
 	// Now that all hubs are stopped, it's safe to close the lobbyUpdates channel.
 	close(m.lobbyUpdates)
+	// Wait for the manager's own goroutines to finish.
+	m.managerWg.Wait()
+
 	log.Println("INFO: All hubs have been shut down.")
 }
 
 // IsNicknameAvailable checks if a nickname is available and valid.
 func (m *HubManager) IsNicknameAvailable(nickname string) (bool, error) {
-	validatedNickname, err := validateNickname(nickname)
-	if err != nil {
+	if _, err := m.validateNickname(nickname); err != nil {
 		return false, err
 	}
 	m.nicknamesMu.RLock()
 	defer m.nicknamesMu.RUnlock()
-	return !m.nicknames[validatedNickname], nil
+	return !m.nicknames[nickname], nil
 }
 
 // AddNickname validates and adds a nickname to the global list.
 func (m *HubManager) AddNickname(nickname string) (string, error) {
-	validatedNickname, err := validateNickname(nickname)
+	validatedNickname, err := m.validateNickname(nickname)
 	if err != nil {
 		return "", err
 	}
@@ -165,7 +169,7 @@ func (m *HubManager) RemoveNickname(nickname string) {
 }
 
 // validateNickname checks the validity of a nickname (length, allowed characters).
-func validateNickname(nickname string) (string, error) {
+func (m *HubManager) validateNickname(nickname string) (string, error) {
 	trimmed := strings.TrimSpace(nickname)
 	charCount := utf8.RuneCountInString(trimmed)
 	if charCount < MinNicknameLength || charCount > MaxNicknameLength {
@@ -178,7 +182,7 @@ func validateNickname(nickname string) (string, error) {
 }
 
 // validateRoomID checks the validity of a room ID (length, allowed characters).
-func validateRoomID(roomID string) (string, error) {
+func (m *HubManager) validateRoomID(roomID string) (string, error) {
 	trimmed := strings.TrimSpace(roomID)
 	charCount := utf8.RuneCountInString(trimmed)
 	if charCount == 0 {
@@ -195,7 +199,7 @@ func validateRoomID(roomID string) (string, error) {
 
 // CreateHub creates a new hub, starts it, and adds it to the manager.
 func (m *HubManager) CreateHub(roomID string) (*Hub, error) {
-	validatedRoomID, err := validateRoomID(roomID)
+	validatedRoomID, err := m.validateRoomID(roomID)
 	if err != nil {
 		return nil, err
 	}
@@ -220,7 +224,7 @@ func (m *HubManager) CreateHub(roomID string) (*Hub, error) {
 
 // GetHub returns a hub by its ID.
 func (m *HubManager) GetHub(roomID string) (*Hub, error) {
-	validatedRoomID, err := validateRoomID(roomID)
+	validatedRoomID, err := m.validateRoomID(roomID)
 	if err != nil {
 		return nil, err
 	}

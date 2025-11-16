@@ -13,7 +13,7 @@ type Hub struct {
 	register       chan *registration     // Register requests from clients.
 	unregister     chan *Client           // Unregister requests from clients.
 	getClientCount chan chan int          // Channel to request the current client count.
-	stop           chan []byte            // Channel to signal hub shutdown.
+	stop           chan struct{}          // Channel to signal hub shutdown.
 }
 
 // broadcastPayload contains the message and the sender client.
@@ -38,7 +38,7 @@ func NewHub(id string, manager *HubManager) *Hub {
 		register:       make(chan *registration),
 		unregister:     make(chan *Client),
 		getClientCount: make(chan chan int),
-		stop:           make(chan []byte, 1), // Buffered to prevent blocking on send.
+		stop:           make(chan struct{}, 1), // Buffered to prevent blocking on send.
 	}
 }
 
@@ -48,8 +48,13 @@ func (h *Hub) GetClientCount() int {
 	select {
 	case h.getClientCount <- respChan:
 		return <-respChan
-	case <-h.stop: // If hub is stopping, don't block and return 0.
+	case <-h.stop:
+		// If the hub is stopped or stopping, return 0 immediately.
 		return 0
+	default:
+		// If the hub's Run loop is busy, it might not be able to respond.
+		// Returning 0 is a safe fallback to prevent blocking the caller.
+		return 0 // Avoid blocking
 	}
 }
 
@@ -65,10 +70,10 @@ func (h *Hub) Run() {
 
 		case client := <-h.unregister:
 			if _, ok := h.clients[client]; ok {
-				h.handleUnregistration(client)
+				hubBecameEmpty := h.handleUnregistration(client)
 				// If the hub became empty naturally (not during a server shutdown),
 				// remove it from the manager and stop its own goroutine.
-				if len(h.clients) == 0 {
+				if hubBecameEmpty {
 					h.manager.RemoveHub(h.ID)
 					return // Stop the hub's goroutine.
 				}
@@ -80,19 +85,23 @@ func (h *Hub) Run() {
 		case respChan := <-h.getClientCount:
 			respChan <- len(h.clients)
 
-		case shutdownMsg := <-h.stop:
-			close(h.stop) // Mark that we are shutting down.
+		case <-h.stop:
+			close(h.stop) // Close channel to signal shutdown to all listeners (like GetClientCount).
 
-			// Notify all clients about the shutdown and close their send channels.
+			// Close all client send channels to signal their writePumps to terminate.
 			for client := range h.clients {
-				client.sendSafe(shutdownMsg)
 				close(client.send)
 			}
 
 			// Wait for all clients to unregister.
+			// This loop waits for each client's readPump to terminate, which in turn
+			// sends a value to the unregister channel.
 			for len(h.clients) > 0 {
 				client := <-h.unregister
-				h.handleUnregistration(client)
+				// During shutdown, we just need to process the unregistration
+				// without checking if the hub becomes empty.
+				delete(h.clients, client)
+				log.Printf("INFO: Client %s (nickname: %s) unregistered during hub shutdown.", client.ID, client.Nickname)
 			}
 			return // All clients have unregistered, exit the Run method.
 		}
@@ -104,35 +113,32 @@ func (h *Hub) handleRegistration(reg *registration) {
 	h.clients[reg.client] = true
 	reg.client.Nickname = reg.nickname
 
-	successMsg, _ := NewMessage(MsgTypeRegisterSuccess, reg.client.ID, "", "Successfully joined the chat room.")
-	reg.client.sendSafe(successMsg)
+	if err := h.sendNewMessage(reg.client, MsgTypeRegisterSuccess, reg.client.ID, "", "Successfully joined the chat room."); err != nil {
+		return // Error is logged in sendNewMessage
+	}
 
 	log.Printf("INFO: Client %s (nickname: %s) registered to hub '%s'.", reg.client.ID, reg.nickname, h.ID)
 
-	joinMsg, _ := NewMessage(MsgTypeUserJoin, reg.client.ID, reg.nickname, "")
-	h.broadcast <- &broadcastPayload{message: joinMsg, client: nil}
-
+	// Broadcast join message to all clients
+	h.broadcastNewMessage(nil, MsgTypeUserJoin, reg.client.ID, reg.nickname, "")
 	h.broadcastUserCountUpdate()
 	h.manager.notifyLobbyUpdate()
 }
 
 // handleUnregistration unregisters a client from the hub.
-func (h *Hub) handleUnregistration(client *Client) {
-	// The check for existence is now done in the caller.
+// It returns true if the hub becomes empty after this operation.
+func (h *Hub) handleUnregistration(client *Client) (hubBecameEmpty bool) {
 	delete(h.clients, client)
 
 	if client.Nickname != "" {
 		log.Printf("INFO: Client %s (nickname: %s) unregistered from hub.", client.ID, client.Nickname)
-		leaveMsg, _ := NewMessage(MsgTypeUserLeave, client.ID, client.Nickname, "")
-		// Use a non-blocking broadcast to avoid deadlocks if the hub is also shutting down.
-		select {
-		case h.broadcast <- &broadcastPayload{message: leaveMsg, client: nil}:
-		default:
-		}
+		// Broadcast leave message to all clients
+		h.broadcastNewMessage(nil, MsgTypeUserLeave, client.ID, client.Nickname, "")
 	}
 
 	h.broadcastUserCountUpdate()
 	h.manager.notifyLobbyUpdate()
+	return len(h.clients) == 0
 }
 
 // handleBroadcast broadcasts a message to all clients in the hub.
@@ -146,10 +152,32 @@ func (h *Hub) handleBroadcast(payload *broadcastPayload) {
 
 // broadcastUserCountUpdate broadcasts the current user count to all clients in the hub.
 func (h *Hub) broadcastUserCountUpdate() {
-	userCountMsg, _ := NewMessage(MsgTypeUserCount, "", "", len(h.clients))
+	h.broadcastNewMessage(nil, MsgTypeUserCount, "", "", len(h.clients))
+}
+
+// broadcastNewMessage creates a new message and broadcasts it to clients.
+// If the payload's client is nil, it broadcasts to all. Otherwise, it broadcasts to all except the sender.
+func (h *Hub) broadcastNewMessage(sender *Client, msgType, id, nickname string, content interface{}) {
+	msgBytes, err := NewMessage(msgType, id, nickname, content)
+	if err != nil {
+		log.Printf("ERROR: Failed to create message for broadcast (type: %s): %v", msgType, err)
+		return
+	}
 	// Use a non-blocking broadcast to avoid deadlocks if the hub is also shutting down.
 	select {
-	case h.broadcast <- &broadcastPayload{message: userCountMsg, client: nil}:
+	case h.broadcast <- &broadcastPayload{message: msgBytes, client: sender}:
 	default:
+		log.Printf("WARN: Hub '%s' broadcast channel is full. Message of type '%s' dropped.", h.ID, msgType)
 	}
+}
+
+// sendNewMessage creates and sends a message to a single client.
+func (h *Hub) sendNewMessage(client *Client, msgType, id, nickname string, content interface{}) error {
+	msgBytes, err := NewMessage(msgType, id, nickname, content)
+	if err != nil {
+		log.Printf("ERROR: Failed to create message for client %s (type: %s): %v", client.ID, msgType, err)
+		return err
+	}
+	client.sendSafe(msgBytes)
+	return nil
 }
