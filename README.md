@@ -97,6 +97,7 @@ Go의 동시성 모델을 활용하여 상태를 안전하고 효율적으로 �
 
 - **`PORT`**: 서버가 실행될 포트 번호. (기본값: `8080`)
 - **`SHUTDOWN_TIMEOUT`**: 우아한 종료 시 대기 시간. (기본값: `5s`)
+- **`MAX_CHAT_MESSAGE_LENGTH`**: 최대 채팅 메시지 길이. (기본값: `1000`)
 - **`ALLOWED_ORIGINS`**: WebSocket 연결을 허용할 Origin 목록 (쉼표로 구분). 설정하지 않으면 개발 편의를 위해 모든 Origin을 허용하며, 경고 메시지가 출력됩니다.
     - **프로덕션 예시:** `ALLOWED_ORIGINS="https://your-domain.com,https://www.your-domain.com"`
     - **ngrok 예시:** `ALLOWED_ORIGINS="https://your-ngrok-subdomain.ngrok.io"`
