@@ -33,6 +33,7 @@ type HubManager struct {
 	lobbyClientsMu sync.RWMutex
 	hubWg          sync.WaitGroup // WaitGroup to track all running Hub goroutines.
 	managerWg      sync.WaitGroup // WaitGroup for the manager's own goroutines (e.g., lobby broadcaster).
+	shutdownChan   chan struct{}  // Closed to signal that the manager is shutting down.
 }
 
 // RoomInfo contains basic information about a chat room for lobby display.
@@ -48,6 +49,7 @@ func NewHubManager() *HubManager {
 		nicknames:    make(map[string]bool),
 		lobbyUpdates: make(chan bool, 1),
 		lobbyClients: make(map[chan string]bool),
+		shutdownChan: make(chan struct{}),
 	}
 	m.managerWg.Add(1)
 	go m.lobbyBroadcastRoutine()
@@ -113,16 +115,28 @@ func (m *HubManager) RemoveHub(hubID string) {
 
 // ShutdownAllHubs sends a shutdown message to all active hubs and waits for them to finish.
 func (m *HubManager) ShutdownAllHubs() {
+	// 1. Signal that the manager is shutting down. This prevents new hubs from being created.
+	close(m.shutdownChan)
+
+	// 2. Now it's safe to get the list of hubs to shut down.
+	// No new hubs can be added after this point.
 	m.roomsMu.RLock()
 	hubsToShutdown := make([]*Hub, 0, len(m.rooms))
 	for _, hub := range m.rooms {
 		hubsToShutdown = append(hubsToShutdown, hub)
 	}
 	m.roomsMu.RUnlock()
+	log.Printf("INFO: Shutting down %d hubs...", len(hubsToShutdown))
 
 	for _, hub := range hubsToShutdown {
-		// Send a signal on the stop channel. The value itself doesn't matter.
-		hub.stop <- struct{}{}
+		// Use a non-blocking send to prevent a deadlock.
+		// This is crucial if the hub's goroutine has already terminated.
+		// This can happen if the last client left just after the RUnlock.
+		// If the hub is already gone, the default case executes, and the shutdown continues without blocking.
+		select {
+		case hub.stop <- struct{}{}:
+		default: // The hub is already stopping or has stopped.
+		}
 	}
 
 	// Wait for all Hub goroutines to completely finish.
@@ -199,6 +213,14 @@ func (m *HubManager) validateRoomID(roomID string) (string, error) {
 
 // CreateHub creates a new hub, starts it, and adds it to the manager.
 func (m *HubManager) CreateHub(roomID string) (*Hub, error) {
+	// Check if the manager is shutting down.
+	select {
+	case <-m.shutdownChan:
+		return nil, errors.New("server is shutting down, cannot create new rooms")
+	default:
+		// Not shutting down, proceed.
+	}
+
 	validatedRoomID, err := m.validateRoomID(roomID)
 	if err != nil {
 		return nil, err
