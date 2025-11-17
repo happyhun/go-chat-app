@@ -51,6 +51,14 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, appMaxChatMessage
 		return
 	}
 
+	// The nickname is passed via query parameter for WebSocket connections.
+	// It's pre-validated and registered by the lobby (SSE handler).
+	nickname := r.URL.Query().Get("nickname")
+	if nickname == "" {
+		log.Printf("WARN: WebSocket connection attempt without a nickname. Closing.")
+		return
+	}
+
 	client := &Client{
 		ID:                      uuid.NewString(),
 		Nickname:                "", // Will be set by the first REGISTER message
@@ -58,6 +66,7 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, appMaxChatMessage
 		conn:                    conn,
 		send:                    make(chan []byte, 256),
 		appMaxChatMessageLength: appMaxChatMessageLength,
+		initialNickname:         nickname, // Store the initial nickname for cleanup.
 	}
 
 	go client.writePump()
@@ -72,13 +81,22 @@ type Client struct {
 	conn                    *websocket.Conn
 	send                    chan []byte // Buffered channel of outbound messages.
 	appMaxChatMessageLength int
+	initialNickname         string // The nickname provided on connection, used for cleanup.
 }
 
 // readPump pumps messages from the websocket connection to the hub.
 // It is the single source of truth for the connection's lifecycle.
 func (c *Client) readPump() {
 	defer func() {
+		// This unregister call is safe even if the client was never registered.
+		// The hub's unregister logic will simply find nothing to delete.
 		c.hub.unregister <- c
+
+		// CRITICAL: Always release the nickname.
+		// This ensures that even if registration fails, the nickname reserved
+		// in the lobby is freed, preventing it from being locked forever.
+		c.hub.manager.RemoveNickname(c.initialNickname)
+
 		if err := c.conn.Close(); err != nil {
 			// This error is expected if the write pump has already closed the connection.
 			if !strings.Contains(err.Error(), "use of closed network connection") {
@@ -113,7 +131,10 @@ func (c *Client) readPump() {
 		return
 	}
 
-	c.hub.register <- &registration{client: c, nickname: regMsg.Content}
+	// The nickname from the message content should match the one from the query parameter.
+	// This ensures the client is registering with the nickname it used to enter the lobby.
+	c.Nickname = c.initialNickname
+	c.hub.register <- &registration{client: c, nickname: c.Nickname}
 
 	// Main read loop
 	for {
@@ -184,6 +205,10 @@ func (c *Client) writePump() {
 				if err := c.conn.WriteMessage(websocket.CloseMessage, []byte{}); err != nil {
 					log.Printf("ERROR: writePump writing close message failed for client %s: %v", c.ID, err)
 				}
+				// After sending a close message, wait for the readPump to close the connection.
+				// This ensures that the readPump's defer cleanup (including unregister) has a chance to run.
+				// A simple way to wait is to try reading, which will fail once the connection is closed.
+				c.conn.ReadMessage()
 				return
 			}
 
