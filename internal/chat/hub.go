@@ -2,6 +2,7 @@ package chat
 
 import (
 	"log"
+	"sync"
 )
 
 // Hub manages the clients and message broadcasting for a single chat room.
@@ -14,6 +15,7 @@ type Hub struct {
 	unregister     chan *Client           // Unregister requests from clients.
 	getClientCount chan chan int          // Channel to request the current client count.
 	stop           chan struct{}          // Channel to signal hub shutdown.
+	stopOnce       sync.Once              // Ensures the stop logic is executed only once.
 }
 
 // broadcastPayload contains the message and the sender client.
@@ -38,7 +40,7 @@ func NewHub(id string, manager *HubManager) *Hub {
 		register:       make(chan *registration),
 		unregister:     make(chan *Client),
 		getClientCount: make(chan chan int),
-		stop:           make(chan struct{}, 1), // Buffered to prevent blocking on send.
+		stop:           make(chan struct{}),
 	}
 }
 
@@ -74,7 +76,7 @@ func (h *Hub) Run() {
 				// If the hub became empty naturally (not during a server shutdown),
 				// remove it from the manager and stop its own goroutine.
 				if hubBecameEmpty {
-					h.manager.RemoveHub(h.ID)
+					h.manager.removeHub(h.ID)
 					return // Stop the hub's goroutine.
 				}
 			}
@@ -86,7 +88,13 @@ func (h *Hub) Run() {
 			respChan <- len(h.clients)
 
 		case <-h.stop:
-			close(h.stop) // Close channel to signal shutdown to all listeners (like GetClientCount).
+			// While shutting down, still respond to client count requests to provide accurate numbers.
+			// But close the response channel immediately after sending to signal that the hub is gone.
+			go func() {
+				for respChan := range h.getClientCount {
+					respChan <- len(h.clients)
+				}
+			}()
 
 			// Close all client send channels to signal their writePumps to terminate.
 			for client := range h.clients {
@@ -103,9 +111,22 @@ func (h *Hub) Run() {
 				delete(h.clients, client)
 				log.Printf("INFO: Client %s (nickname: %s) unregistered during hub shutdown.", client.ID, client.Nickname)
 			}
+
+			// Close the getClientCount channel to terminate the temporary goroutine.
+			close(h.getClientCount)
 			return // All clients have unregistered, exit the Run method.
 		}
 	}
+}
+
+// Stop safely shuts down the hub by closing the stop channel.
+// It uses sync.Once to ensure the shutdown logic is executed only once.
+func (h *Hub) Stop() {
+	h.stopOnce.Do(func() {
+		// Closing the channel is sufficient to signal all listeners.
+		// The Run loop will handle the rest of the cleanup.
+		close(h.stop)
+	})
 }
 
 // handleRegistration registers a new client to the hub.

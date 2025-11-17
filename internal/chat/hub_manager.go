@@ -102,8 +102,8 @@ func (m *HubManager) UnregisterLobbyClient(clientChan chan string) {
 }
 
 // RemoveHub removes a hub from the HubManager.
-func (m *HubManager) RemoveHub(hubID string) {
-	m.roomsMu.Lock()
+func (m *HubManager) removeHub(hubID string) {
+	m.roomsMu.Lock() // This method should be called by the hub itself, which means it's internal.
 	defer m.roomsMu.Unlock()
 
 	if _, ok := m.rooms[hubID]; ok {
@@ -129,14 +129,7 @@ func (m *HubManager) ShutdownAllHubs() {
 	log.Printf("INFO: Shutting down %d hubs...", len(hubsToShutdown))
 
 	for _, hub := range hubsToShutdown {
-		// Use a non-blocking send to prevent a deadlock.
-		// This is crucial if the hub's goroutine has already terminated.
-		// This can happen if the last client left just after the RUnlock.
-		// If the hub is already gone, the default case executes, and the shutdown continues without blocking.
-		select {
-		case hub.stop <- struct{}{}:
-		default: // The hub is already stopping or has stopped.
-		}
+		hub.Stop() // Safely trigger the hub's shutdown, guaranteed to run only once.
 	}
 
 	// Wait for all Hub goroutines to completely finish.
@@ -263,10 +256,17 @@ func (m *HubManager) GetHub(roomID string) (*Hub, error) {
 // ListRooms returns a list of all active chat rooms with their user counts.
 func (m *HubManager) ListRooms() []RoomInfo {
 	m.roomsMu.RLock()
-	defer m.roomsMu.RUnlock()
-	roomList := make([]RoomInfo, 0, len(m.rooms))
-	for id, hub := range m.rooms {
-		roomList = append(roomList, RoomInfo{ID: id, Users: hub.GetClientCount()})
+	// Copy the hubs to a new slice to release the lock as soon as possible.
+	// This avoids holding the lock while calling hub.GetClientCount(), which can lead to deadlocks.
+	hubs := make([]*Hub, 0, len(m.rooms))
+	for _, hub := range m.rooms {
+		hubs = append(hubs, hub)
+	}
+	m.roomsMu.RUnlock()
+
+	roomList := make([]RoomInfo, 0, len(hubs))
+	for _, hub := range hubs {
+		roomList = append(roomList, RoomInfo{ID: hub.ID, Users: hub.GetClientCount()})
 	}
 	return roomList
 }
