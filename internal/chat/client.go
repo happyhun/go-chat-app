@@ -62,6 +62,7 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, appMaxChatMessage
 	client := &Client{
 		ID:                      uuid.NewString(),
 		Nickname:                "", // Will be set by the first REGISTER message
+		isRegistered:            false,
 		hub:                     hub,
 		conn:                    conn,
 		send:                    make(chan []byte, 256),
@@ -77,6 +78,7 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, appMaxChatMessage
 type Client struct {
 	ID                      string
 	Nickname                string
+	isRegistered            bool
 	hub                     *Hub
 	conn                    *websocket.Conn
 	send                    chan []byte // Buffered channel of outbound messages.
@@ -90,12 +92,15 @@ func (c *Client) readPump() {
 	defer func() {
 		// This unregister call is safe even if the client was never registered.
 		// The hub's unregister logic will simply find nothing to delete.
-		c.hub.unregister <- c
+		if c.isRegistered {
+			c.hub.unregister <- c
+		}
 
 		// CRITICAL: Always release the nickname.
 		// This ensures that even if registration fails, the nickname reserved
 		// in the lobby is freed, preventing it from being locked forever.
 		c.hub.manager.RemoveNickname(c.initialNickname)
+		log.Printf("INFO: Cleaned up resources for client %s (nickname: %s)", c.ID, c.initialNickname)
 
 		if err := c.conn.Close(); err != nil {
 			// This error is expected if the write pump has already closed the connection.
@@ -113,6 +118,7 @@ func (c *Client) readPump() {
 		return c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	})
 
+	// Wait for the first message, which must be a registration message.
 	// The first message must be a registration message.
 	_, messageData, err := c.conn.ReadMessage()
 	if err != nil {
@@ -131,9 +137,11 @@ func (c *Client) readPump() {
 		return
 	}
 
+	// Process the registration message and formally join the hub.
 	// The nickname from the message content should match the one from the query parameter.
 	// This ensures the client is registering with the nickname it used to enter the lobby.
 	c.Nickname = c.initialNickname
+	c.isRegistered = true
 	c.hub.register <- &registration{client: c, nickname: c.Nickname}
 
 	// Main read loop

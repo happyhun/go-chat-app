@@ -132,7 +132,6 @@ func (h *Hub) Stop() {
 // handleRegistration registers a new client to the hub.
 func (h *Hub) handleRegistration(reg *registration) {
 	h.clients[reg.client] = true
-	reg.client.Nickname = reg.nickname
 
 	if err := h.sendNewMessage(reg.client, MsgTypeRegisterSuccess, reg.client.ID, "", "Successfully joined the chat room."); err != nil {
 		return // Error is logged in sendNewMessage
@@ -151,7 +150,7 @@ func (h *Hub) handleRegistration(reg *registration) {
 func (h *Hub) handleUnregistration(client *Client) (hubBecameEmpty bool) {
 	delete(h.clients, client)
 
-	if client.Nickname != "" {
+	if client.isRegistered {
 		log.Printf("INFO: Client %s (nickname: %s) unregistered from hub.", client.ID, client.Nickname)
 		// Broadcast leave message to all clients
 		h.broadcastNewMessage(nil, MsgTypeUserLeave, client.ID, client.Nickname, "")
