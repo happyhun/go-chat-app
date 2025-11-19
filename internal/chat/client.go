@@ -201,14 +201,8 @@ func (c *Client) writePump() {
 				return
 			}
 			if !ok {
-				// The hub closed the channel. Send a close message to the peer.
-				if err := c.conn.WriteMessage(websocket.CloseMessage, []byte{}); err != nil {
-					log.Printf("ERROR: writePump writing close message failed for client %s: %v", c.ID, err)
-				}
-				// After sending a close message, wait for the readPump to close the connection.
-				// This ensures that the readPump's defer cleanup (including unregister) has a chance to run.
-				// A simple way to wait is to try reading, which will fail once the connection is closed.
-				c.conn.ReadMessage()
+				// The hub closed the channel. The readPump is responsible for closing the connection.
+				// The writePump's job is done.
 				return
 			}
 
