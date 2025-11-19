@@ -15,8 +15,8 @@ const (
 	MsgTypeUserLeave = "user_leave"
 	// MsgTypeUserCount is a server-to-client message for updating the user count.
 	MsgTypeUserCount = "user_count"
-	// MsgTypeRegisterSuccess is a server-to-client message confirming successful registration.
-	MsgTypeRegisterSuccess = "register_success"
+	// MsgTypeWelcome is a server-to-client message sent upon successful connection.
+	MsgTypeWelcome = "welcome"
 	// MsgTypeChatError is a server-to-client message for chat-related errors (e.g., message too long).
 	MsgTypeChatError = "chat_error"
 	// MsgTypeTypingStart is a client-to-server message indicating the user started typing.

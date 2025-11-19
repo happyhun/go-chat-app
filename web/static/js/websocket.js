@@ -69,19 +69,20 @@ export function connectLobbyStream(nickname) {
 /**
  * Connects to the WebSocket for a specific chat room.
  */
-export function connectWebSocket() {
+export function connectWebSocket(roomID, nickname) {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   // The server now expects the nickname as a query parameter for immediate registration.
   const socketURL = `${protocol}://${
     window.location.host
-  }/ws/${encodeURIComponent(state.roomID)}?nickname=${encodeURIComponent(
-    state.myNickname
-  )}`;
+  }/ws/${encodeURIComponent(roomID)}?nickname=${encodeURIComponent(nickname)}`;
   state.socket = new WebSocket(socketURL);
 
   state.socket.onopen = () => {
-    // Registration is now handled by the server upon connection via the query parameter.
-    // No need to send a separate register message.
+    console.log("WebSocket connection established.");
+    showLobbyLoader(false);
+    showView("chat", ui.messageInput);
+    ui.chatRoomName.textContent = state.roomID;
+    updateCharCounter();
   };
 
   state.socket.onclose = (event) => {
@@ -126,12 +127,9 @@ export function connectWebSocket() {
 function handleSocketMessage(event) {
   const data = JSON.parse(event.data);
   switch (data.type) {
-    case MSG_TYPES.REGISTER_SUCCESS:
+    case MSG_TYPES.WELCOME:
       state.myID = data.id;
-      showLobbyLoader(false);
-      showView("chat", ui.messageInput);
-      ui.chatRoomName.textContent = state.roomID;
-      updateCharCounter();
+      console.log(`Welcome! Your ID is ${state.myID}`);
       break;
     case MSG_TYPES.SERVER_SHUTDOWN:
       appendSystemMessage(data.content);

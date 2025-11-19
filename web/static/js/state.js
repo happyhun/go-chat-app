@@ -82,7 +82,7 @@ export const MSG_TYPES = {
   USER_JOIN: "user_join",
   USER_LEAVE: "user_leave",
   USER_COUNT: "user_count",
-  REGISTER_SUCCESS: "register_success",
+  WELCOME: "welcome", // Sent on successful connection, contains client's own ID
   CHAT_ERROR: "chat_error",
   TYPING_START: "typing_start",
   TYPING_STOP: "typing_stop",

@@ -60,7 +60,7 @@ function joinRoom(selectedRoomID) {
   state.roomID = selectedRoomID;
   ui.messagesDiv.innerHTML = ""; // Clear message area for the new room
   showLobbyLoader(true);
-  connectWebSocket();
+  connectWebSocket(selectedRoomID, state.myNickname);
 }
 
 /**

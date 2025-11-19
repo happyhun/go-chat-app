@@ -128,7 +128,7 @@ func (h *Hub) Stop() {
 func (h *Hub) handleRegistration(reg *registration) {
 	h.clients[reg.client] = true
 
-	if err := h.sendNewMessage(reg.client, MsgTypeRegisterSuccess, reg.client.ID, "", "Successfully joined the chat room."); err != nil {
+	if err := h.sendNewMessage(reg.client, MsgTypeWelcome, reg.client.ID, "", "Welcome to the chat!"); err != nil {
 		return // Error is logged in sendNewMessage
 	}
 
