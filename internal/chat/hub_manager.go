@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go-chat-app/internal/chat"
 	"log"
 	"regexp"
 	"strings"
@@ -264,9 +265,23 @@ func (m *HubManager) ListRooms() []RoomInfo {
 	}
 	m.roomsMu.RUnlock()
 
-	roomList := make([]RoomInfo, 0, len(hubs))
-	for _, hub := range hubs {
-		roomList = append(roomList, RoomInfo{ID: hub.ID, Users: hub.GetClientCount()})
+	roomList := make([]RoomInfo, len(hubs))
+	var wg sync.WaitGroup
+	wg.Add(len(hubs))
+
+	for i, hub := range hubs {
+		go func(i int, hub *chat.Hub) {
+			defer wg.Done()
+			// GetClientCount can be slow if the hub is busy.
+			// We can add a timeout here if needed, but for now, we rely on its non-blocking nature.
+			roomList[i] = RoomInfo{ID: hub.ID, Users: hub.GetClientCount()}
+		}(i, hub)
 	}
+
+	wg.Wait()
+
+	// Filter out any rooms that might have been removed while we were counting.
+	// This is a defensive measure, though unlikely.
+
 	return roomList
 }

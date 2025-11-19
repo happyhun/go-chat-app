@@ -88,14 +88,6 @@ func (h *Hub) Run() {
 			respChan <- len(h.clients)
 
 		case <-h.stop:
-			// While shutting down, still respond to client count requests to provide accurate numbers.
-			// But close the response channel immediately after sending to signal that the hub is gone.
-			go func() {
-				for respChan := range h.getClientCount {
-					respChan <- len(h.clients)
-				}
-			}()
-
 			// Close all client send channels to signal their writePumps to terminate.
 			for client := range h.clients {
 				close(client.send)
@@ -104,15 +96,18 @@ func (h *Hub) Run() {
 			// Wait for all clients to unregister.
 			// This loop waits for each client's readPump to terminate, which in turn
 			// sends a value to the unregister channel.
+			// During shutdown, we also handle any final client count requests.
 			for len(h.clients) > 0 {
-				client := <-h.unregister
-				// During shutdown, we just need to process the unregistration
-				// without checking if the hub becomes empty.
-				delete(h.clients, client)
-				log.Printf("INFO: Client %s (nickname: %s) unregistered during hub shutdown.", client.ID, client.Nickname)
+				select {
+				case client := <-h.unregister:
+					delete(h.clients, client)
+					log.Printf("INFO: Client %s (nickname: %s) unregistered during hub shutdown.", client.ID, client.Nickname)
+				case respChan := <-h.getClientCount:
+					respChan <- len(h.clients)
+				}
 			}
 
-			// Close the getClientCount channel to terminate the temporary goroutine.
+			// Close the channel to signal that the hub is fully stopped.
 			close(h.getClientCount)
 			return // All clients have unregistered, exit the Run method.
 		}
