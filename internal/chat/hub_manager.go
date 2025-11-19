@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"go-chat-app/internal/chat"
 	"log"
 	"regexp"
 	"strings"
@@ -270,7 +269,7 @@ func (m *HubManager) ListRooms() []RoomInfo {
 	wg.Add(len(hubs))
 
 	for i, hub := range hubs {
-		go func(i int, hub *chat.Hub) {
+		go func(i int, hub *Hub) {
 			defer wg.Done()
 			// GetClientCount can be slow if the hub is busy.
 			// We can add a timeout here if needed, but for now, we rely on its non-blocking nature.
