@@ -145,11 +145,9 @@ func (h *Hub) handleRegistration(reg *registration) {
 func (h *Hub) handleUnregistration(client *Client) (hubBecameEmpty bool) {
 	delete(h.clients, client)
 
-	if client.isRegistered {
-		log.Printf("INFO: Client %s (nickname: %s) unregistered from hub.", client.ID, client.Nickname)
-		// Broadcast leave message to all clients
-		h.broadcastNewMessage(nil, MsgTypeUserLeave, client.ID, client.Nickname, "")
-	}
+	log.Printf("INFO: Client %s (nickname: %s) unregistered from hub.", client.ID, client.Nickname)
+	// Broadcast leave message to all clients
+	h.broadcastNewMessage(nil, MsgTypeUserLeave, client.ID, client.Nickname, "")
 
 	h.broadcastUserCountUpdate()
 	h.manager.notifyLobbyUpdate()

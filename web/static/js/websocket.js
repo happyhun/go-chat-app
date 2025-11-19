@@ -71,15 +71,17 @@ export function connectLobbyStream(nickname) {
  */
 export function connectWebSocket() {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  // The server now expects the nickname as a query parameter for immediate registration.
   const socketURL = `${protocol}://${
     window.location.host
-  }/ws/${encodeURIComponent(state.roomID)}`;
+  }/ws/${encodeURIComponent(state.roomID)}?nickname=${encodeURIComponent(
+    state.myNickname
+  )}`;
   state.socket = new WebSocket(socketURL);
 
   state.socket.onopen = () => {
-    state.socket.send(
-      JSON.stringify({ type: MSG_TYPES.REGISTER, content: state.myNickname })
-    );
+    // Registration is now handled by the server upon connection via the query parameter.
+    // No need to send a separate register message.
   };
 
   state.socket.onclose = (event) => {
@@ -135,10 +137,6 @@ function handleSocketMessage(event) {
       appendSystemMessage(data.content);
       state.socket.onclose = null; // Prevent the default onclose handler
       state.socket.close(1000, "Server shutdown received");
-      break;
-    case MSG_TYPES.REGISTER_ERROR:
-      alert(data.content);
-      state.socket.close(1000, "Register error received");
       break;
     case MSG_TYPES.CHAT_ERROR:
       alert(data.content);

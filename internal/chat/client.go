@@ -55,20 +55,24 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, appMaxChatMessage
 	// It's pre-validated and registered by the lobby (SSE handler).
 	nickname := r.URL.Query().Get("nickname")
 	if nickname == "" {
+		// This check is now valid as the frontend is expected to provide the nickname.
 		log.Printf("WARN: WebSocket connection attempt without a nickname. Closing.")
+		// We can't write an http.Error after the upgrade has started.
+		// The connection will just be closed, and the client will have to handle it.
 		return
 	}
 
 	client := &Client{
 		ID:                      uuid.NewString(),
-		Nickname:                "", // Will be set by the first REGISTER message
-		isRegistered:            false,
+		Nickname:                nickname, // Set nickname on connection
 		hub:                     hub,
 		conn:                    conn,
 		send:                    make(chan []byte, 256),
 		appMaxChatMessageLength: appMaxChatMessageLength,
-		initialNickname:         nickname, // Store the initial nickname for cleanup.
 	}
+
+	// Register the client immediately.
+	hub.register <- &registration{client: client, nickname: client.Nickname}
 
 	go client.writePump()
 	go client.readPump()
@@ -78,29 +82,23 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, appMaxChatMessage
 type Client struct {
 	ID                      string
 	Nickname                string
-	isRegistered            bool
 	hub                     *Hub
 	conn                    *websocket.Conn
 	send                    chan []byte // Buffered channel of outbound messages.
 	appMaxChatMessageLength int
-	initialNickname         string // The nickname provided on connection, used for cleanup.
 }
 
 // readPump pumps messages from the websocket connection to the hub.
 // It is the single source of truth for the connection's lifecycle.
 func (c *Client) readPump() {
 	defer func() {
-		// This unregister call is safe even if the client was never registered.
-		// The hub's unregister logic will simply find nothing to delete.
-		if c.isRegistered {
-			c.hub.unregister <- c
-		}
+		c.hub.unregister <- c
 
 		// CRITICAL: Always release the nickname.
 		// This ensures that even if registration fails, the nickname reserved
 		// in the lobby is freed, preventing it from being locked forever.
-		c.hub.manager.RemoveNickname(c.initialNickname)
-		log.Printf("INFO: Cleaned up resources for client %s (nickname: %s)", c.ID, c.initialNickname)
+		c.hub.manager.RemoveNickname(c.Nickname)
+		log.Printf("INFO: Cleaned up resources for client %s (nickname: %s)", c.ID, c.Nickname)
 
 		if err := c.conn.Close(); err != nil {
 			// This error is expected if the write pump has already closed the connection.
@@ -117,32 +115,6 @@ func (c *Client) readPump() {
 	c.conn.SetPongHandler(func(string) error {
 		return c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	})
-
-	// Wait for the first message, which must be a registration message.
-	// The first message must be a registration message.
-	_, messageData, err := c.conn.ReadMessage()
-	if err != nil {
-		var closeErr *websocket.CloseError
-		if !errors.As(err, &closeErr) {
-			log.Printf("ERROR: readPump initial read for client %s: %v", c.ID, err)
-		}
-		return
-	}
-
-	var regMsg IncomingMessage
-	if err := json.Unmarshal(messageData, &regMsg); err != nil || regMsg.Type != MsgTypeRegister {
-		errorMsg, _ := NewMessage(MsgTypeRegisterError, "", "", "Invalid registration message. Connection closed.")
-		c.sendSafe(errorMsg)
-		log.Printf("ERROR: invalid registration message from client %s: %v", c.ID, err)
-		return
-	}
-
-	// Process the registration message and formally join the hub.
-	// The nickname from the message content should match the one from the query parameter.
-	// This ensures the client is registering with the nickname it used to enter the lobby.
-	c.Nickname = c.initialNickname
-	c.isRegistered = true
-	c.hub.register <- &registration{client: c, nickname: c.Nickname}
 
 	// Main read loop
 	for {
