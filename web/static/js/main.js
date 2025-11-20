@@ -67,6 +67,9 @@ function joinRoom(selectedRoomID) {
  * Handles the submission of the nickname form.
  */
 async function handleNicknameSubmit() {
+  const btn = ui.nicknameForm.querySelector("button");
+  btn.disabled = true; // Prevent double submission
+
   const nickname = ui.nicknameInput.value.trim();
   const validationError = validateInput(
     nickname,
@@ -78,17 +81,30 @@ async function handleNicknameSubmit() {
 
   if (validationError) {
     alert(validationError);
+    btn.disabled = false;
     return;
   }
 
-  const btn = ui.nicknameForm.querySelector("button");
-  if (btn.disabled) {
+  try {
+    const available = await checkNicknameAvailability(nickname);
+    if (!available) {
+      throw new Error(
+        "This nickname is not available. Please choose another one."
+      );
+    }
+
+    state.myNickname = nickname;
+    showLobby();
+  } catch (error) {
+    alert(error.message);
+  } finally {
+    // In a real app, you might not want to re-enable the button if the user has moved to the lobby,
+    // but for error cases, it's good to re-enable it.
     alert("This nickname is not available. Please choose another one.");
-    return;
+    if (state.currentView === "nickname") {
+      btn.disabled = false;
+    }
   }
-
-  state.myNickname = nickname;
-  showLobby();
 }
 
 /**
