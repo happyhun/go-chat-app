@@ -1,10 +1,12 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"go-chat-app/internal/chat"
-	"log"
+	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -27,21 +29,23 @@ type Server struct {
 	router       *http.ServeMux
 	shutdownChan chan struct{}
 	httpServer   *http.Server
+	logger       *slog.Logger
 }
 
 // New creates and initializes a new Server instance.
 // It registers routes and returns the server.
-func New(config *Config) *Server {
-	hubManager := chat.NewHubManager()
+func New(config *Config, logger *slog.Logger) *Server {
+	hubManager := chat.NewHubManager(logger)
 	server := &Server{
 		config:       config,
 		hubManager:   hubManager,
 		router:       http.NewServeMux(),
 		shutdownChan: make(chan struct{}),
+		logger:       logger,
 	}
 	server.httpServer = &http.Server{
 		Addr:    ":" + config.Port,
-		Handler: server.cspMiddleware(server.router),
+		Handler: server.loggingMiddleware(server.cspMiddleware(server.router)),
 	}
 	server.registerRoutes()
 	return server
@@ -51,9 +55,10 @@ func New(config *Config) *Server {
 func (s *Server) Start() {
 	// Run the server in a separate goroutine so that it doesn't block.
 	go func() {
-		log.Printf("Server starting on http://localhost:%s", s.config.Port)
+		s.logger.Info("Server starting", "addr", "http://localhost:"+s.config.Port)
 		if err := s.httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("Failed to start server: %v", err)
+			s.logger.Error("Failed to start server", "err", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -67,7 +72,7 @@ func (s *Server) Start() {
 
 // shutdown orchestrates the graceful shutdown of the server.
 func (s *Server) shutdown() {
-	log.Println("Shutting down server...")
+	s.logger.Info("Shutting down server...")
 
 	// 1. Signal all long-running HTTP handlers (like SSE) to shut down.
 	// This must be done BEFORE shutting down hubs, which might generate events that
@@ -82,8 +87,60 @@ func (s *Server) shutdown() {
 	defer cancel()
 
 	if err := s.httpServer.Shutdown(ctx); err != nil {
-		log.Fatalf("Server forced to shutdown: %v", err)
+		s.logger.Error("Server forced to shutdown due to timeout", "err", err)
+		os.Exit(1)
 	}
 
-	log.Println("Server exited properly")
+	s.logger.Info("Server exited properly")
+}
+
+// responseWriter is a wrapper around http.ResponseWriter that allows us to capture the status code.
+type responseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func newResponseWriter(w http.ResponseWriter) *responseWriter {
+	// Default to 200 OK if WriteHeader is not called.
+	return &responseWriter{w, http.StatusOK}
+}
+
+func (rw *responseWriter) WriteHeader(code int) {
+	rw.statusCode = code
+	rw.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack implements the http.Hijacker interface to support WebSocket upgrades.
+func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := rw.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("http.Hijacker interface is not supported")
+	}
+	return h.Hijack()
+}
+
+// Flush implements the http.Flusher interface to support streaming responses like SSE.
+func (rw *responseWriter) Flush() {
+	// We need to check if the underlying ResponseWriter supports the Flusher interface.
+	// This is crucial for streaming responses.
+	if flusher, ok := rw.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	// If it doesn't support it, we do nothing, which is the correct behavior.
+}
+
+// loggingMiddleware logs details about each incoming HTTP request.
+func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rw := newResponseWriter(w)
+		next.ServeHTTP(rw, r)
+		s.logger.Info("HTTP request processed",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"remoteAddr", r.RemoteAddr,
+			"status", rw.statusCode,
+			"duration", time.Since(start),
+		)
+	})
 }

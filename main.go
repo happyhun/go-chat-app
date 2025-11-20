@@ -2,7 +2,7 @@ package main
 
 import (
 	"go-chat-app/internal/server"
-	"log"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -16,47 +16,58 @@ const (
 )
 
 func main() {
+	logger := initLogger()
+	slog.SetDefault(logger)
+
 	config := loadConfig()
-	app := server.New(config)
+	app := server.New(config, logger)
 	app.Start()
 }
 
 // loadConfig loads configuration from environment variables.
 func loadConfig() *server.Config {
+	slog.Info("Loading configuration from environment variables...")
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = defaultPort
+		slog.Info("PORT not set, using default", "port", port)
 	}
 
 	shutdownTimeoutRaw := os.Getenv("SHUTDOWN_TIMEOUT")
+	slog.Debug("Read SHUTDOWN_TIMEOUT", "rawValue", shutdownTimeoutRaw)
 	shutdownTimeout, err := time.ParseDuration(shutdownTimeoutRaw)
 	if err != nil || shutdownTimeoutRaw == "" {
 		shutdownTimeout = defaultShutdownTimeout
-		log.Printf("WARN: Invalid or missing SHUTDOWN_TIMEOUT. Using default: %v", shutdownTimeout)
+		slog.Info("Invalid or missing SHUTDOWN_TIMEOUT, using default", "timeout", shutdownTimeout)
 	}
 
 	allowedOriginsRaw := os.Getenv("ALLOWED_ORIGINS")
+	slog.Debug("Read ALLOWED_ORIGINS", "rawValue", allowedOriginsRaw)
 	var allowedOrigins []string
 	if allowedOriginsRaw != "" {
 		origins := strings.Split(allowedOriginsRaw, ",")
 		for _, origin := range origins {
 			allowedOrigins = append(allowedOrigins, strings.TrimSpace(origin))
 		}
+	} else {
+		slog.Warn("ALLOWED_ORIGINS is not set. All origins will be allowed. This is insecure and should not be used in production.")
 	}
 
 	maxChatMessageLengthRaw := os.Getenv("MAX_CHAT_MESSAGE_LENGTH")
+	slog.Debug("Read MAX_CHAT_MESSAGE_LENGTH", "rawValue", maxChatMessageLengthRaw)
 	maxChatMessageLength, err := strconv.Atoi(maxChatMessageLengthRaw)
 	if err != nil || maxChatMessageLength <= 0 {
 		maxChatMessageLength = defaultMaxChatMessageLength
-		log.Printf("WARN: Invalid or missing MAX_CHAT_MESSAGE_LENGTH. Using default: %d", maxChatMessageLength)
+		slog.Info("Invalid or missing MAX_CHAT_MESSAGE_LENGTH, using default", "length", maxChatMessageLength)
 	}
 
-	log.Printf("Configuration loaded: Port=%s, ShutdownTimeout=%v, MaxChatMessageLength=%d", port, shutdownTimeout, maxChatMessageLength)
-	if len(allowedOrigins) == 0 {
-		log.Printf("WARN: ALLOWED_ORIGINS is not set. All origins will be allowed. This is insecure and should not be used in production.")
-	} else {
-		log.Printf("AllowedOrigins: %v", allowedOrigins)
-	}
+	slog.Info("Configuration loaded successfully",
+		"port", port,
+		"shutdownTimeout", shutdownTimeout,
+		"allowedOrigins", allowedOrigins,
+		"maxChatMessageLength", maxChatMessageLength,
+	)
 
 	return &server.Config{
 		Port:                 port,
@@ -64,4 +75,25 @@ func loadConfig() *server.Config {
 		AllowedOrigins:       allowedOrigins,
 		MaxChatMessageLength: maxChatMessageLength,
 	}
+}
+
+// initLogger initializes and returns a new slog.Logger based on the LOG_LEVEL environment variable.
+func initLogger() *slog.Logger {
+	var level slog.Level
+	switch strings.ToUpper(os.Getenv("LOG_LEVEL")) {
+	case "DEBUG":
+		level = slog.LevelDebug
+	case "WARN":
+		level = slog.LevelWarn
+	case "ERROR":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
+	}
+
+	handlerOpts := &slog.HandlerOptions{Level: level}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, handlerOpts))
+
+	logger.Info("Logger initialized", "level", level.String())
+	return logger
 }

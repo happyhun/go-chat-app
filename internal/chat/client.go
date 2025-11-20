@@ -2,9 +2,8 @@ package chat
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -40,14 +39,14 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, appMaxChatMessage
 					return true
 				}
 			}
-			log.Printf("WARN: Origin %s not allowed", origin)
+			hub.logger.Warn("Origin not allowed", "origin", origin)
 			return false
 		},
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("ERROR: failed to upgrade connection: %v", err)
+		hub.logger.Error("failed to upgrade connection", "err", err)
 		return
 	}
 
@@ -56,7 +55,7 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, appMaxChatMessage
 	nickname := r.URL.Query().Get("nickname")
 	if nickname == "" {
 		// This check is now valid as the frontend is expected to provide the nickname.
-		log.Printf("WARN: WebSocket connection attempt without a nickname. Closing.")
+		hub.logger.Warn("WebSocket connection attempt without a nickname. Closing.")
 		// We can't write an http.Error after the upgrade has started.
 		// The connection will just be closed, and the client will have to handle it.
 		return
@@ -69,6 +68,7 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, appMaxChatMessage
 		conn:                    conn,
 		send:                    make(chan []byte, 256),
 		appMaxChatMessageLength: appMaxChatMessageLength,
+		logger:                  hub.logger.With("clientID", uuid.NewString(), "nickname", nickname),
 	}
 
 	// Register the client immediately.
@@ -86,6 +86,7 @@ type Client struct {
 	conn                    *websocket.Conn
 	send                    chan []byte // Buffered channel of outbound messages.
 	appMaxChatMessageLength int
+	logger                  *slog.Logger
 }
 
 // readPump pumps messages from the websocket connection to the hub.
@@ -98,18 +99,18 @@ func (c *Client) readPump() {
 		// This ensures that even if registration fails, the nickname reserved
 		// in the lobby is freed, preventing it from being locked forever.
 		c.hub.manager.RemoveNickname(c.Nickname)
-		log.Printf("INFO: Cleaned up resources for client %s (nickname: %s)", c.ID, c.Nickname)
+		c.logger.Info("Cleaned up client resources")
 
 		if err := c.conn.Close(); err != nil {
 			// This error is expected if the write pump has already closed the connection.
 			if !strings.Contains(err.Error(), "use of closed network connection") {
-				log.Printf("ERROR: closing connection for client %s: %v", c.ID, err)
+				c.logger.Error("closing connection", "err", err)
 			}
 		}
 	}()
 	c.conn.SetReadLimit(int64(c.appMaxChatMessageLength * 4)) // Max 4 bytes per rune
 	if err := c.conn.SetReadDeadline(time.Now().Add(pongWait)); err != nil {
-		log.Printf("ERROR: readPump SetReadDeadline failed for client %s: %v", c.ID, err)
+		c.logger.Error("readPump SetReadDeadline failed", "err", err)
 		return
 	}
 	c.conn.SetPongHandler(func(string) error {
@@ -123,16 +124,18 @@ func (c *Client) readPump() {
 			// Any error from ReadMessage terminates the pump.
 			// We only log errors that are not standard websocket close errors,
 			// as these are expected during the connection lifecycle.
-			var closeErr *websocket.CloseError
-			if !errors.As(err, &closeErr) {
-				log.Printf("ERROR: Unhandled error in readPump for client %s: %v", c.ID, err)
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+				c.logger.Error("Unhandled error in readPump", "err", err)
+			} else {
+				// This is a normal closure, log at a lower level.
+				c.logger.Info("readPump closing due to normal websocket closure", "err", err)
 			}
 			break // Exit loop on error, defer will handle cleanup.
 		}
 
 		var incomingMsg IncomingMessage
 		if err := json.Unmarshal(messageData, &incomingMsg); err != nil {
-			log.Printf("ERROR: failed to unmarshal message from client %s: %v", c.ID, err)
+			c.logger.Error("failed to unmarshal message from client", "err", err)
 			continue
 		}
 
@@ -154,15 +157,15 @@ func (c *Client) readPump() {
 		case MsgTypeTypingStart, MsgTypeTypingStop:
 			outgoingMsgBytes, newErr = NewMessage(incomingMsg.Type, c.ID, c.Nickname, "")
 		case MsgTypeLeaveRoom:
-			log.Printf("INFO: client %s requested to leave the room. Closing connection.", c.ID)
+			c.logger.Info("client requested to leave the room. Closing connection.")
 			return // This will trigger the defer and close the connection.
 		default:
-			log.Printf("WARN: unknown message type '%s' from client %s", incomingMsg.Type, c.ID)
+			c.logger.Warn("unknown message type", "type", incomingMsg.Type)
 			continue
 		}
 
 		if newErr != nil {
-			log.Printf("ERROR: failed to create new message for client %s: %v", c.ID, newErr)
+			c.logger.Error("failed to create new message for client", "err", newErr)
 			continue
 		}
 		c.hub.broadcast <- &broadcastPayload{message: outgoingMsgBytes, client: c}
@@ -177,7 +180,7 @@ func (c *Client) writePump() {
 		select {
 		case message, ok := <-c.send:
 			if err := c.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
-				log.Printf("ERROR: writePump SetWriteDeadline failed for client %s: %v", c.ID, err)
+				c.logger.Error("writePump SetWriteDeadline failed", "err", err)
 				return
 			}
 			if !ok {
@@ -187,16 +190,16 @@ func (c *Client) writePump() {
 			}
 
 			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
-				log.Printf("ERROR: writePump WriteMessage failed for client %s: %v", c.ID, err)
+				c.logger.Error("writePump WriteMessage failed", "err", err)
 				return
 			}
 		case <-ticker.C:
 			if err := c.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
-				log.Printf("ERROR: writePump ping SetWriteDeadline failed for client %s: %v", c.ID, err)
+				c.logger.Error("writePump ping SetWriteDeadline failed", "err", err)
 				return
 			}
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				log.Printf("ERROR: writePump ping WriteMessage failed for client %s: %v", c.ID, err)
+				c.logger.Error("writePump ping WriteMessage failed", "err", err)
 				return
 			}
 		}
@@ -208,6 +211,6 @@ func (c *Client) sendSafe(msg []byte) {
 	select {
 	case c.send <- msg:
 	default:
-		log.Printf("WARN: client %s send channel is full. Message dropped.", c.ID)
+		c.logger.Warn("client send channel is full. Message dropped.")
 	}
 }

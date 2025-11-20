@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"go-chat-app/internal/chat"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 )
@@ -76,7 +76,7 @@ func (s *Server) nicknameCheckHandler() http.HandlerFunc {
 			// Although IsNicknameAvailable currently doesn't return an error, handling it is good practice.
 			http.Error(w, err.Error(), http.StatusBadRequest)
 		} else if err := json.NewEncoder(w).Encode(map[string]bool{"available": available}); err != nil {
-			log.Printf("ERROR: failed to encode nickname availability response: %v", err)
+			s.logger.Error("failed to encode nickname availability response", "err", err)
 		}
 	}
 }
@@ -101,7 +101,7 @@ func (s *Server) listRoomsHandler(w http.ResponseWriter, _ *http.Request) {
 	rooms := s.hubManager.ListRooms()
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(rooms); err != nil {
-		log.Printf("ERROR: failed to encode room list response: %v", err)
+		s.logger.Error("failed to encode room list response", "err", err)
 	}
 }
 
@@ -125,7 +125,7 @@ func (s *Server) createRoomHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 	// Respond with the ID of the created room.
 	if err := json.NewEncoder(w).Encode(map[string]string{"roomID": reqBody.RoomID}); err != nil {
-		log.Printf("ERROR: failed to encode create room response: %v", err)
+		s.logger.Error("failed to encode create room response", "err", err)
 	}
 }
 
@@ -146,14 +146,15 @@ func (s *Server) configHandler() http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(clientConfig); err != nil {
-			log.Printf("ERROR: failed to encode config response: %v", err)
+			s.logger.Error("failed to encode config response", "err", err)
 		}
 	}
 }
 
 // sendSseMessage formats and sends a message according to the Server-Sent Events protocol.
-func sendSseMessage(w http.ResponseWriter, data string) error {
+func sendSseMessage(w http.ResponseWriter, data string, logger *slog.Logger) error {
 	if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+		logger.Error("failed to send SSE message", "err", err)
 		return err
 	}
 	if flusher, ok := w.(http.Flusher); ok {
@@ -176,7 +177,7 @@ func (s *Server) sseHandler() http.HandlerFunc {
 		}
 		defer func() {
 			s.hubManager.RemoveNickname(validatedNickname)
-			log.Printf("INFO: SSE client disconnected, nickname '%s' released", validatedNickname)
+			s.logger.Debug("SSE client disconnected, nickname released", "nickname", validatedNickname)
 		}()
 
 		s.streamEvents(w, r, validatedNickname)
@@ -195,10 +196,10 @@ func (s *Server) handleNicknameValidation(w http.ResponseWriter, r *http.Request
 
 	validatedNickname, err := s.hubManager.AddNickname(nickname)
 	if err != nil {
-		log.Printf("INFO: SSE nickname registration failed for %s: %v", nickname, err)
+		s.logger.Info("SSE nickname registration failed", "nickname", nickname, "err", err)
 		// Send a specific error event to the client to be handled by the frontend.
-		if err := sendSseMessage(w, fmt.Sprintf(`{"error": "%s"}`, err.Error())); err != nil {
-			log.Printf("ERROR: failed to send SSE error message: %v", err)
+		if err := sendSseMessage(w, fmt.Sprintf(`{"error": "%s"}`, err.Error()), s.logger); err != nil {
+			s.logger.Error("failed to send SSE error message", "err", err)
 		}
 		return "", false
 	}
@@ -211,17 +212,18 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, nickname s
 	s.hubManager.RegisterLobbyClient(clientChan)
 	defer s.hubManager.UnregisterLobbyClient(clientChan)
 
-	log.Printf("INFO: SSE client connected (nickname: %s)", nickname)
+	logger := s.logger.With("nickname", nickname, "remoteAddr", r.RemoteAddr)
+	logger.Info("SSE client connected to lobby stream")
 
 	// Send initial data
 	initialRooms := s.hubManager.ListRooms()
 	jsonData, err := json.Marshal(initialRooms)
 	if err != nil {
-		log.Printf("ERROR: failed to marshal initial lobby data: %v", err)
+		logger.Error("failed to marshal initial lobby data", "err", err)
 		return
 	}
-	if err := sendSseMessage(w, string(jsonData)); err != nil {
-		log.Printf("ERROR: failed to send initial SSE room list: %v", err)
+	if err := sendSseMessage(w, string(jsonData), logger); err != nil {
+		logger.Error("failed to send initial SSE room list", "err", err)
 		return
 	}
 
@@ -231,15 +233,15 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, nickname s
 			if !ok {
 				return // Hub manager closed the channel.
 			}
-			if err := sendSseMessage(w, eventData); err != nil {
-				log.Printf("ERROR: failed to send SSE event data: %v", err)
+			if err := sendSseMessage(w, eventData, logger); err != nil {
+				logger.Error("failed to send SSE event data", "err", err)
 				return
 			}
 		case <-r.Context().Done():
-			log.Printf("INFO: SSE client connection closed by client (nickname: %s)", nickname)
+			logger.Info("SSE client connection closed by client request")
 			return
 		case <-s.shutdownChan:
-			log.Printf("INFO: Server shutdown signal received. Closing SSE connection for %s.", nickname)
+			logger.Info("Server shutdown signal received. Closing SSE connection.")
 			return
 		}
 	}

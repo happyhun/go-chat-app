@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"regexp"
 	"strings"
 	"sync"
@@ -34,6 +34,7 @@ type HubManager struct {
 	hubWg          sync.WaitGroup // WaitGroup to track all running Hub goroutines.
 	managerWg      sync.WaitGroup // WaitGroup for the manager's own goroutines (e.g., lobby broadcaster).
 	shutdownChan   chan struct{}  // Closed to signal that the manager is shutting down.
+	logger         *slog.Logger
 }
 
 // RoomInfo contains basic information about a chat room for lobby display.
@@ -43,13 +44,14 @@ type RoomInfo struct {
 }
 
 // NewHubManager creates and initializes a new HubManager instance.
-func NewHubManager() *HubManager {
+func NewHubManager(logger *slog.Logger) *HubManager {
 	m := &HubManager{
 		rooms:        make(map[string]*Hub),
 		nicknames:    make(map[string]bool),
 		lobbyUpdates: make(chan bool, 1),
 		lobbyClients: make(map[chan string]bool),
 		shutdownChan: make(chan struct{}),
+		logger:       logger,
 	}
 	m.managerWg.Add(1)
 	go m.lobbyBroadcastRoutine()
@@ -64,7 +66,7 @@ func (m *HubManager) lobbyBroadcastRoutine() {
 		rooms := m.ListRooms()
 		jsonData, err := json.Marshal(rooms)
 		if err != nil {
-			log.Printf("ERROR: failed to marshal lobby data: %v", err)
+			m.logger.Error("failed to marshal lobby data", "err", err)
 			continue
 		}
 		m.lobbyClientsMu.RLock()
@@ -72,7 +74,7 @@ func (m *HubManager) lobbyBroadcastRoutine() {
 			select {
 			case clientChan <- string(jsonData):
 			default:
-				log.Printf("WARN: lobby client channel full, skipping message.")
+				m.logger.Warn("lobby client channel full, skipping message.")
 			}
 		}
 		m.lobbyClientsMu.RUnlock()
@@ -108,7 +110,7 @@ func (m *HubManager) removeHub(hubID string) {
 
 	if _, ok := m.rooms[hubID]; ok {
 		delete(m.rooms, hubID)
-		log.Printf("INFO: Hub '%s' removed from manager as it became empty.", hubID)
+		m.logger.Info("Hub removed from manager as it became empty.", "hubID", hubID)
 		m.notifyLobbyUpdate()
 	}
 }
@@ -126,7 +128,7 @@ func (m *HubManager) ShutdownAllHubs() {
 		hubsToShutdown = append(hubsToShutdown, hub)
 	}
 	m.roomsMu.RUnlock()
-	log.Printf("INFO: Shutting down %d hubs...", len(hubsToShutdown))
+	m.logger.Info("Shutting down hubs...", "count", len(hubsToShutdown))
 
 	for _, hub := range hubsToShutdown {
 		hub.Stop() // Safely trigger the hub's shutdown, guaranteed to run only once.
@@ -140,7 +142,7 @@ func (m *HubManager) ShutdownAllHubs() {
 	// Wait for the manager's own goroutines to finish.
 	m.managerWg.Wait()
 
-	log.Println("INFO: All hubs have been shut down.")
+	m.logger.Info("All hubs have been shut down.")
 }
 
 // IsNicknameAvailable checks if a nickname is available and valid.
@@ -180,9 +182,11 @@ func (m *HubManager) validateNickname(nickname string) (string, error) {
 	trimmed := strings.TrimSpace(nickname)
 	charCount := utf8.RuneCountInString(trimmed)
 	if charCount < MinNicknameLength || charCount > MaxNicknameLength {
+		m.logger.Info("Nickname validation failed: invalid length", "nickname", nickname, "length", charCount)
 		return "", fmt.Errorf("nickname must be between %d and %d characters", MinNicknameLength, MaxNicknameLength)
 	}
 	if !validNicknameRegex.MatchString(trimmed) {
+		m.logger.Info("Nickname validation failed: invalid characters", "nickname", nickname)
 		return "", errors.New("nickname can only contain letters, numbers, and underscores")
 	}
 	return trimmed, nil
@@ -193,12 +197,15 @@ func (m *HubManager) validateRoomID(roomID string) (string, error) {
 	trimmed := strings.TrimSpace(roomID)
 	charCount := utf8.RuneCountInString(trimmed)
 	if charCount == 0 {
+		m.logger.Info("Room ID validation failed: empty string")
 		return "", errors.New("room name cannot be empty")
 	}
 	if charCount > MaxRoomIDLength {
+		m.logger.Info("Room ID validation failed: invalid length", "roomID", roomID, "length", charCount)
 		return "", fmt.Errorf("room name can be at most %d characters long", MaxRoomIDLength)
 	}
 	if !validRoomIDRegex.MatchString(trimmed) {
+		m.logger.Info("Room ID validation failed: invalid characters", "roomID", roomID)
 		return "", errors.New("room name can only contain letters, numbers, hyphens, and underscores")
 	}
 	return trimmed, nil
@@ -225,7 +232,7 @@ func (m *HubManager) CreateHub(roomID string) (*Hub, error) {
 		return nil, errors.New("a room with this name already exists")
 	}
 
-	hub := NewHub(validatedRoomID, m)
+	hub := NewHub(validatedRoomID, m, m.logger)
 	m.hubWg.Add(1)
 	go func() {
 		defer m.hubWg.Done()
@@ -233,7 +240,7 @@ func (m *HubManager) CreateHub(roomID string) (*Hub, error) {
 	}()
 	m.rooms[validatedRoomID] = hub
 	m.notifyLobbyUpdate()
-	log.Printf("INFO: Hub '%s' created.", validatedRoomID)
+	m.logger.Info("Hub created.", "hubID", validatedRoomID)
 	return hub, nil
 }
 
