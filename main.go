@@ -34,12 +34,19 @@ func loadConfig() *server.Config {
 		slog.Info("PORT not set, using default", "port", port)
 	}
 
-	shutdownTimeoutRaw := os.Getenv("SHUTDOWN_TIMEOUT")
-	slog.Debug("Read SHUTDOWN_TIMEOUT", "rawValue", shutdownTimeoutRaw)
-	shutdownTimeout, err := time.ParseDuration(shutdownTimeoutRaw)
-	if err != nil || shutdownTimeoutRaw == "" {
-		shutdownTimeout = defaultShutdownTimeout
-		slog.Info("Invalid or missing SHUTDOWN_TIMEOUT, using default", "timeout", shutdownTimeout)
+	shutdownTimeout := defaultShutdownTimeout
+	if shutdownTimeoutRaw := os.Getenv("SHUTDOWN_TIMEOUT"); shutdownTimeoutRaw == "" {
+		slog.Info("SHUTDOWN_TIMEOUT not set, using default", "timeout", shutdownTimeout)
+	} else if parsedTimeout, err := time.ParseDuration(shutdownTimeoutRaw); err != nil {
+		slog.Warn(
+			"Invalid SHUTDOWN_TIMEOUT format, using default",
+			"provided", shutdownTimeoutRaw,
+			"error", err,
+			"default", shutdownTimeout,
+		)
+	} else {
+		shutdownTimeout = parsedTimeout
+		slog.Info("SHUTDOWN_TIMEOUT loaded from environment", "timeout", shutdownTimeout)
 	}
 
 	allowedOriginsRaw := os.Getenv("ALLOWED_ORIGINS")
